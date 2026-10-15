@@ -1,0 +1,197 @@
+# ============================================================================
+# Wazuh Docker Deployment - Single Node
+# Host : soc-siem (10.0.10.10)
+# Documentation : https://documentation.wazuh.com/current/docker/
+# ============================================================================
+
+version: '3.7'
+
+services:
+  # ============================================================================
+  # Wazuh Indexer (Stockage et recherche)
+  # ============================================================================
+  wazuh.indexer:
+    image: wazuh/wazuh-indexer:4.7.2
+    hostname: wazuh.indexer
+    container_name: wazuh-indexer
+    networks:
+      - siem-network
+    ports:
+      - "9200:9200"  # API REST
+    environment:
+      - "OPENSEARCH_JAVA_OPTS=-Xms1g -Xmx1g"  # Ajuster selon RAM disponible
+      - "bootstrap.memory_lock=true"
+      - "cluster.name=wazuh-cluster"
+      - "node.name=wazuh.indexer"
+      - "discovery.type=single-node"
+      - "network.host=0.0.0.0"
+      - "http.port=9200"
+      - "transport.tcp.port=9300"
+      - "compatibility.override_main_response_version=true"
+      - "plugins.security.ssl.http.enabled=true"
+      - "plugins.security.ssl.http.enabled_certificates=/etc/wazuh-indexer/certs/indexer.pem"
+      - "plugins.security.ssl.http.enabled_key=/etc/wazuh-indexer/certs/indexer-key.pem"
+      - "plugins.security.ssl.transport.enforce_hostname_verification=false"
+      - "plugins.security.ssl.http.pemcert_filepath=/etc/wazuh-indexer/certs/indexer.pem"
+      - "plugins.security.ssl.http.pemkey_filepath=/etc/wazuh-indexer/certs/indexer-key.pem"
+      - "plugins.security.ssl.http.pemtrustedcas_filepath=/etc/wazuh-indexer/certs/root-ca.pem"
+      - "plugins.security.authcz.admin_dn:CN=admin,OU=Wazuh,O=Wazuh,L=California,C=US"
+      - "plugins.security.nodes_dn:CN=wazuh.indexer,OU=Wazuh,O=Wazuh,L=California,C=US"
+      - "path.data=/var/lib/opensearch/data"
+      - "path.logs=/var/log/opensearch"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    volumes:
+      - wazuh-indexer-data:/var/lib/opensearch/data
+      - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/etc/wazuh-indexer/certs/root-ca.pem
+      - ./config/wazuh_indexer_ssl_certs/indexer.pem:/etc/wazuh-indexer/certs/indexer.pem
+      - ./config/wazuh_indexer_ssl_certs/indexer-key.pem:/etc/wazuh-indexer/certs/indexer-key.pem
+      - ./config/wazuh_indexer_ssl_certs/admin.pem:/etc/wazuh-indexer/certs/admin.pem
+      - ./config/wazuh_indexer_ssl_certs/admin-key.pem:/etc/wazuh-indexer/certs/admin-key.pem
+    healthcheck:
+      test: ["CMD-SHELL", "curl -XGET https://localhost:9200 -ku admin:SecretPassword123! -sS --max-time 30 | grep -q '200 OK' || exit 1"]
+      interval: 30s
+      timeout: 30s
+      retries: 5
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 1G
+    restart: unless-stopped
+
+  # ============================================================================
+  # Wazuh Manager (Collecte et analyse des logs)
+  # ============================================================================
+  wazuh.manager:
+    image: wazuh/wazuh-manager:4.7.2
+    hostname: wazuh.manager
+    container_name: wazuh-manager
+    networks:
+      - siem-network
+    ports:
+      - "1514:1514/tcp"   # Agent communication
+      - "1514:1514/udp"   # Agent communication UDP
+      - "1515:1515/tcp"   # Agent enrollment
+      - "514:514/udp"     # Syslog
+      - "55000:55000/tcp" # Wazuh API
+    environment:
+      - INDEXER_URL=https://wazuh.indexer:9200
+      - INDEXER_USERNAME=admin
+      - INDEXER_PASSWORD=SecretPassword123!
+      - FILEBEAT_SSL_VERIFICATION_MODE=full
+      - SSL_MANAGER_CERT=/var/ossec/etc/sslmanager.cert
+      - SSL_MANAGER_KEY=/var/ossec/etc/sslmanager.key
+      - SSL_CA_BUNDLE=/var/ossec/etc/rootCA.pem
+      - API_USERNAME=wazuh-admin
+      - API_PASSWORD=SecretPassword123!
+    volumes:
+      - wazuh-manager-data:/var/ossec/data
+      - ./config/wazuh_cluster/wazuh_manager.conf:/wazuh-config-mount/etc/ossec.conf
+      - ./config/wazuh_manager_ssl_certs/sslmanager.cert:/var/ossec/etc/sslmanager.cert
+      - ./config/wazuh_manager_ssl_certs/sslmanager.key:/var/ossec/etc/sslmanager.key
+      - ./config/wazuh_manager_ssl_certs/rootCA.pem:/var/ossec/etc/rootCA.pem
+    depends_on:
+      wazuh.indexer:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "/var/ossec/bin/wazuh-control status | grep -q 'is running' || exit 1"]
+      interval: 30s
+      timeout: 30s
+      retries: 5
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 1G
+    restart: unless-stopped
+
+  # ============================================================================
+  # Wazuh Dashboard (Interface web)
+  # ============================================================================
+  wazuh.dashboard:
+    image: wazuh/wazuh-dashboard:4.7.2
+    hostname: wazuh.dashboard
+    container_name: wazuh-dashboard
+    networks:
+      - siem-network
+    ports:
+      - "443:5601"  # HTTPS Dashboard
+    environment:
+      - INDEXER_URL=https://wazuh.indexer:9200
+      - INDEXER_USERNAME=admin
+      - INDEXER_PASSWORD=SecretPassword123!
+      - WAZUH_API_URL=https://wazuh.manager
+      - API_USERNAME=wazuh-admin
+      - API_PASSWORD=SecretPassword123!
+      - DASHBOARD_USERNAME=admin
+      - DASHBOARD_PASSWORD=SecretPassword123!
+      - SERVER_SSL_ENABLED=true
+      - SERVER_SSL_CERTIFICATE=/usr/share/wazuh-dashboard/certs/dashboard.pem
+      - SERVER_SSL_KEY=/usr/share/wazuh-dashboard/certs/dashboard-key.pem
+      - SERVER_SSL_CERTIFICATEAUTHORITIES=/usr/share/wazuh-dashboard/certs/root-ca.pem
+      - UI_SETTINGS_OVERRIDES='{"defaultIndex":"wazuh-monitoring-*"}'
+    volumes:
+      - wazuh-dashboard-data:/usr/share/wazuh-dashboard/data
+      - ./config/wazuh_dashboard_ssl_certs/dashboard.pem:/usr/share/wazuh-dashboard/certs/dashboard.pem
+      - ./config/wazuh_dashboard_ssl_certs/dashboard-key.pem:/usr/share/wazuh-dashboard/certs/dashboard-key.pem
+      - ./config/wazuh_dashboard_ssl_certs/root-ca.pem:/usr/share/wazuh-dashboard/certs/root-ca.pem
+      - ./config/wazuh_dashboard/wazuh.yml:/usr/share/wazuh-dashboard/data/wazuh.yml
+    depends_on:
+      wazuh.indexer:
+        condition: service_healthy
+      wazuh.manager:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -XGET https://localhost:5601 -k -sS --max-time 30 | grep -q '200 OK' || exit 1"]
+      interval: 30s
+      timeout: 30s
+      retries: 5
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 512M
+    restart: unless-stopped
+
+# ============================================================================
+# Réseaux
+# ============================================================================
+networks:
+  siem-network:
+    driver: bridge
+    external: true
+
+# ============================================================================
+# Volumes
+# ============================================================================
+volumes:
+  wazuh-indexer-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /opt/wazuh-indexer/data
+  wazuh-manager-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /opt/wazuh/data
+  wazuh-dashboard-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /opt/wazuh-dashboard/data

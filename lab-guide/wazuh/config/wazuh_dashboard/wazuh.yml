@@ -1,0 +1,51 @@
+# ============================================================================
+# Wazuh Dashboard Configuration
+# Documentation : https://documentation.wazuh.com/current/user-manual/wazuh-dashboard/settings.html
+# ============================================================================
+
+# Configuration des hôtes
+server.host: 0.0.0.0
+server.port: 5601
+
+# Configuration Elasticsearch/Indexer
+elasticsearch.hosts:
+  - https://wazuh.indexer:9200
+
+# Authentification
+elasticsearch.username: kibanaserver
+elasticsearch.password: SecretPassword123!
+
+# SSL/TLS
+elasticsearch.ssl.verificationMode: certificate
+elasticsearch.ssl.certificateAuthorities:
+  - /usr/share/wazuh-dashboard/certs/root-ca.pem
+elasticsearch.ssl.certificate: /usr/share/wazuh-dashboard/certs/dashboard.pem
+elasticsearch.ssl.key: /usr/share/wazuh-dashboard/certs/dashboard-key.pem
+
+# Configuration Wazuh
+wazuh.monitoring.enabled: true
+wazuh.monitoring.frequency: 900
+wazuh.monitoring.shards: 1
+wazuh.monitoring.replicas: 0
+
+# Configuration API
+wazuh.api.run_as: false
+
+# Logging
+logging.dest: /usr/share/wazuh-dashboard/data/wazuh-dashboard.log
+logging.silent: false
+logging.quiet: false
+logging.verbose: false
+logging.json: false
+
+# Plugins
+plugin.wazuh.disabled: false
+
+# Configuration de l'interface utilisateur
+uiSettings.overrides.defaultIndex: wazuh-monitoring-*
+
+# Timezone
+timezone: Europe/Paris
+
+# Langue
+i18n.locale: fr

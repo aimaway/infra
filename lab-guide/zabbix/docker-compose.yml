@@ -1,0 +1,208 @@
+# ============================================================================
+# Zabbix Docker Deployment
+# Host : soc-siem (10.0.10.10)
+# Documentation : https://www.zabbix.com/documentation/current/en/manual/install/containers
+# ============================================================================
+
+version: '3.7'
+
+services:
+  # ============================================================================
+  # PostgreSQL Database (Backend Zabbix)
+  # ============================================================================
+  zabbix-postgres:
+    image: postgres:15-alpine
+    hostname: zabbix-postgres
+    container_name: zabbix-postgres
+    networks:
+      - siem-network
+    environment:
+      - POSTGRES_USER=zabbix
+      - POSTGRES_PASSWORD=zabbix_password_2027
+      - POSTGRES_DB=zabbix
+    volumes:
+      - zabbix-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zabbix -d zabbix"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 256M
+    restart: unless-stopped
+
+  # ============================================================================
+  # Zabbix Server (Collecte et traitement des données)
+  # ============================================================================
+  zabbix-server:
+    image: zabbix/zabbix-server-pgsql:ubuntu-6.4-latest
+    hostname: zabbix-server
+    container_name: zabbix-server
+    networks:
+      - siem-network
+    ports:
+      - "10051:10051"  # Zabbix Server port
+    environment:
+      - DB_SERVER_HOST=zabbix-postgres
+      - DB_SERVER_PORT=5432
+      - POSTGRES_USER=zabbix
+      - POSTGRES_PASSWORD=zabbix_password_2027
+      - POSTGRES_DB=zabbix
+      - ZBX_CACHESIZE=128M
+      - ZBX_HISTORYCACHESIZE=64M
+      - ZBX_TRENDCACHESIZE=64M
+      - ZBX_STARTPOLLERS=5
+      - ZBX_STARTPOLLERSUNREACHABLE=3
+      - ZBX_STARTTRAPPERS=5
+      - ZBX_STARTDISCOVERERS=3
+      - ZBX_STARTTIMERS=2
+      - ZBX_HOUSEKEEPINGFREQUENCY=1
+      - ZBX_MAXHOUSEKEEPERDELETE=5000
+      - ZBX_TIMEOUT=30
+      - ZBX_UNREACHABLEPOLLER=1
+      - ZBX_JAVAGATEWAY=zabbix-java-gateway
+      - ZBX_JAVAGATEWAYPORT=10052
+      - ZBX_STARTJAVAPOLLERS=3
+    volumes:
+      - zabbix-server-data:/var/lib/zabbix
+      - ./config/zabbix_server.conf:/etc/zabbix/zabbix_server.conf:ro
+      - ./externalscripts:/usr/lib/zabbix/externalscripts:ro
+      - ./alertscripts:/usr/lib/zabbix/alertscripts:ro
+    depends_on:
+      zabbix-postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "zabbix_server -T || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 512M
+    restart: unless-stopped
+
+  # ============================================================================
+  # Zabbix Web Interface
+  # ============================================================================
+  zabbix-web:
+    image: zabbix/zabbix-web-nginx-pgsql:ubuntu-6.4-latest
+    hostname: zabbix-web
+    container_name: zabbix-web
+    networks:
+      - siem-network
+    ports:
+      - "8080:8080"   # HTTP
+      - "8443:8443"   # HTTPS
+    environment:
+      - ZBX_SERVER_HOST=zabbix-server
+      - ZBX_SERVER_PORT=10051
+      - DB_SERVER_HOST=zabbix-postgres
+      - DB_SERVER_PORT=5432
+      - POSTGRES_USER=zabbix
+      - POSTGRES_PASSWORD=zabbix_password_2027
+      - POSTGRES_DB=zabbix
+      - PHP_TZ=Europe/Paris
+      - ZBX_SERVER_NAME=Infracentra Lab
+    volumes:
+      - ./config/php-fpm.conf:/etc/zabbix/php-fpm.conf:ro
+    depends_on:
+      zabbix-server:
+        condition: service_healthy
+      zabbix-postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 256M
+    restart: unless-stopped
+
+  # ============================================================================
+  # Zabbix Java Gateway (Pour monitoring Java/JMX)
+  # ============================================================================
+  zabbix-java-gateway:
+    image: zabbix/zabbix-java-gateway:ubuntu-6.4-latest
+    hostname: zabbix-java-gateway
+    container_name: zabbix-java-gateway
+    networks:
+      - siem-network
+    ports:
+      - "10052:10052"
+    environment:
+      - ZBX_START_POLLERS=5
+      - ZBX_TIMEOUT=30
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+        reservations:
+          memory: 128M
+    restart: unless-stopped
+
+  # ============================================================================
+  # Zabbix Agent (Pour monitorer le host lui-même)
+  # ============================================================================
+  zabbix-agent:
+    image: zabbix/zabbix-agent2:ubuntu-6.4-latest
+    hostname: zabbix-agent
+    container_name: zabbix-agent
+    networks:
+      - siem-network
+    ports:
+      - "10050:10050"
+    environment:
+      - ZBX_HOSTNAME=zabbix-agent
+      - ZBX_SERVER_HOST=zabbix-server
+      - ZBX_SERVER_PORT=10051
+      - ZBX_ACTIVEREFRESHES=1
+      - ZBX_STARTAGENTS=3
+      - ZBX_TIMEOUT=30
+    volumes:
+      - /proc:/proc:ro
+      - /sys:/sys:ro
+      - /etc:/host/etc:ro
+    privileged: true
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+        reservations:
+          memory: 64M
+    restart: unless-stopped
+
+# ============================================================================
+# Réseaux
+# ============================================================================
+networks:
+  siem-network:
+    driver: bridge
+    external: true
+
+# ============================================================================
+# Volumes
+# ============================================================================
+volumes:
+  zabbix-postgres-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /opt/zabbix/data
+  zabbix-server-data:
+    driver: local
