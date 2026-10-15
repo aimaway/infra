@@ -51,6 +51,48 @@ docker compose -f docker-compose.prebuilt.yml down -v       # wipe data too
   up for the API/integration routes and auto-creates its tables on startup.
 - Change `SECRET_KEY` before exposing this anywhere public.
 
+## Where to find the new features (Advanced Ticketing / Notification Engine)
+
+After logging in, look at the LEFT SIDEBAR:
+
+| Role | Sidebar entry | Direct URL |
+|---|---|---|
+| Platform Admin | "Advanced Ticketing" + "Notification Engine" under *Platform Operations* | `http://localhost:3000/#/client-admin/advanced-tickets` · `http://localhost:3000/#/client-admin/notifications` |
+| Client Admin | "Advanced Ticketing" (Inbox icon) + "Notification Engine" (Radio icon) under *Operations* | same URLs, scoped to your tenant |
+| Client User | Client Portal → Tickets / Notifications tabs | `http://localhost:3000/#/portal` |
+
+**If you don't see these sidebar items, your browser is serving an OLD JavaScript
+bundle.** The nginx container mounts `./dist` read-only and serves it as-is — if
+`dist/` was built before the features were added, the app you load is the old
+version even though the source code is new. Fix (run once, then hard-refresh with
+Ctrl+Shift+R):
+
+```bash
+cd infracentra
+npm install        # first time only
+npm run build      # regenerates dist/ including the new pages
+# nginx serves ./dist directly — no container restart needed, just hard-refresh
+```
+
+(A fresh, correct `dist/` is now committed in this repo — pulling the latest code
+and restarting the stack also works.)
+
+## Working logins (demo mode)
+
+The login screen accepts **any password** for the emails below (demo auth matches
+the email against the seeded user list). Easiest: click a role card on the login page.
+
+- **Platform admin:** `ops@infracentra.io`
+- **Client admin (Enterprise):** `sarah.chen@aegiscorp.io`
+- **Client admin (SME):** `jordan@techstart.io`
+- **Client admin (Mid-Market):** `dr.wong@medsecure.health`
+- **Client user (analyst):** `marcus.j@aegiscorp.io`
+
+⚠️ Older docs mention `sarah.chen@infracentracorp.io` — that email no longer
+exists in the current data; use `sarah.chen@aegiscorp.io`. Any login from an
+outdated doc will silently fall back to the platform-admin demo user, which is
+likely why you only saw the old platform admin view.
+
 ## Troubleshooting: `infracentra-db` shows as "unhealthy"
 
 Two common causes on Kali:
