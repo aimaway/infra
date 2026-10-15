@@ -24,6 +24,10 @@ import PlatformDashboardPage from './pages/platform/PlatformDashboardPage';
 import PlatformClientsPage from './pages/platform/PlatformClientsPage';
 import PlatformAuditPage from './pages/platform/PlatformAuditPage';
 import PlatformIntegrationsPage from './pages/platform/PlatformIntegrationsPage';
+import PlatformServicesOverviewPage from './pages/platform/PlatformServicesOverviewPage';
+import AdvancedTicketingPage from './pages/client-admin/AdvancedTicketingPage';
+import NotificationEnginePage from './pages/client-admin/NotificationEnginePage';
+import ClientPortalPage from './pages/ClientPortalPage';
 
 // Client admin views
 import ClientAdminDashboardPage from './pages/client-admin/ClientAdminDashboardPage';
@@ -91,6 +95,12 @@ function AppRoutes() {
         <Route path="admin/clients" element={<PlatformClientsPage />} />
         <Route path="admin/audit" element={<PlatformAuditPage />} />
         <Route path="admin/integrations" element={<PlatformIntegrationsPage />} />
+        <Route path="admin/services-ops" element={<PlatformServicesOverviewPage />} />
+
+        {/* Cross-role service consoles (Advanced Ticketing + Notification Engine) */}
+        <Route path="client-admin/advanced-tickets" element={<AdvancedTicketingPage />} />
+        <Route path="client-admin/notifications" element={<NotificationEnginePage />} />
+        <Route path="portal" element={<ClientPortalPage />} />
 
         {/* Client admin views */}
         <Route path="client-admin/dashboard" element={<ClientAdminDashboardPage />} />
