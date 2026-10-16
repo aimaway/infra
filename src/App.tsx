@@ -24,13 +24,16 @@ import PlatformDashboardPage from './pages/platform/PlatformDashboardPage';
 import PlatformClientsPage from './pages/platform/PlatformClientsPage';
 import PlatformAuditPage from './pages/platform/PlatformAuditPage';
 import PlatformIntegrationsPage from './pages/platform/PlatformIntegrationsPage';
+import PlatformServicesOverviewPage from './pages/platform/PlatformServicesOverviewPage';
+import AdvancedTicketingPage from './pages/client-admin/AdvancedTicketingPage';
+import NotificationEnginePage from './pages/client-admin/NotificationEnginePage';
+import ClientPortalPage from './pages/ClientPortalPage';
 
 // Client admin views
 import ClientAdminDashboardPage from './pages/client-admin/ClientAdminDashboardPage';
 import ClientEntitlementsPage from './pages/client-admin/ClientEntitlementsPage';
 import ClientAdminDashboard from './pages/client-admin/ClientAdminDashboard';
 import ClientAdminPlans from './pages/client-admin/ClientAdminPlans';
-import WidgetCreator from './pages/client-admin/WidgetCreator';
 import ServiceDeviceManager from './pages/client-admin/ServiceDeviceManager';
 import AlertsPage from './pages/client-admin/AlertsPage';
 import StatisticsPage from './pages/client-admin/StatisticsPage';
@@ -38,7 +41,6 @@ import NetworkStatistics from './pages/client-admin/NetworkStatistics';
 import DeviceStatistics from './pages/client-admin/DeviceStatistics';
 import PerformanceStatistics from './pages/client-admin/PerformanceStatistics';
 import DeviceDetails from './pages/client-admin/DeviceDetails';
-import TicketingSystem from './pages/client-admin/TicketingSystem';
 import EmailSecurityPage from './pages/client-admin/EmailSecurityPage';
 import EndpointProtectionPage from './pages/client-admin/EndpointProtectionPage';
 import CloudSecurityPage from './pages/client-admin/CloudSecurityPage';
@@ -91,6 +93,12 @@ function AppRoutes() {
         <Route path="admin/clients" element={<PlatformClientsPage />} />
         <Route path="admin/audit" element={<PlatformAuditPage />} />
         <Route path="admin/integrations" element={<PlatformIntegrationsPage />} />
+        <Route path="admin/services-ops" element={<PlatformServicesOverviewPage />} />
+
+        {/* Cross-role service consoles (Advanced Ticketing + Notification Engine) */}
+        <Route path="client-admin/advanced-tickets" element={<AdvancedTicketingPage />} />
+        <Route path="client-admin/notifications" element={<NotificationEnginePage />} />
+        <Route path="portal" element={<ClientPortalPage />} />
 
         {/* Client admin views */}
         <Route path="client-admin/dashboard" element={<ClientAdminDashboardPage />} />
@@ -99,7 +107,6 @@ function AppRoutes() {
         <Route path="client-admin/entitlements" element={<ClientEntitlementsPage />} />
         <Route path="client-admin/infrastructure" element={<ClientAdminDashboard />} />
         <Route path="client-admin/plans" element={<ClientAdminPlans />} />
-        <Route path="client-admin/widgets" element={<WidgetCreator />} />
         <Route path="client-admin/service/:serviceId/devices" element={<ServiceDeviceManager />} />
         <Route path="client-admin/alerts" element={<AlertsPage />} />
         <Route path="client-admin/alerts/:alertId" element={<AlertsPage />} />
@@ -108,8 +115,7 @@ function AppRoutes() {
         <Route path="client-admin/statistics/devices" element={<DeviceStatistics />} />
         <Route path="client-admin/statistics/performance" element={<PerformanceStatistics />} />
         <Route path="client-admin/infrastructure/device/:deviceId" element={<DeviceDetails />} />
-        <Route path="client-admin/tickets" element={<TicketingSystem />} />
-        <Route path="client-admin/tickets/:ticketId" element={<TicketingSystem />} />
+        <Route path="client-admin/tickets" element={<Navigate to="/client-admin/advanced-tickets" replace />} />
         
         {/* Service-specific pages */}
         <Route path="client-admin/email-security" element={<EmailSecurityPage />} />

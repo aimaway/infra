@@ -5,11 +5,17 @@ import { Shield, Zap, Eye, EyeOff, Loader2, Lock, Mail, ArrowRight, Building2, U
 
 export default function LoginPage() {
   const navigate = useNavigate();
-  const { login, loginAsDemo, isLoading, user } = useAuth();
+  const { login, loginAsDemo, isLoading, user, authError } = useAuth();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
-  const [activeTab, setActiveTab] = useState<'demo' | 'login'>('demo');
+  const [activeTab, setActiveTab] = useState<'demo' | 'login'>('login');
+  const [demoMode, setDemoMode] = useState(() => localStorage.getItem('ic_demo_mode') === '1');
+
+  const toggleDemoMode = (on: boolean) => {
+    setDemoMode(on);
+    localStorage.setItem('ic_demo_mode', on ? '1' : '0');
+  };
 
   const handleDemoLogin = async (key: string) => {
     const loggedInUser = await loginAsDemo(key);
@@ -208,6 +214,35 @@ export default function LoginPage() {
                     'Sign In'
                   )}
                 </button>
+
+                {authError && (
+                  <div className="rounded-lg bg-red-500/10 border border-red-500/30 px-3 py-2 text-xs text-red-300">
+                    {authError}
+                  </div>
+                )}
+
+                {/* Single Demo Mode toggle: OFF = 100% real backend, ON = sample data */}
+                <div className="flex items-center justify-between rounded-lg bg-slate-800/40 border border-slate-700/50 px-3 py-2.5">
+                  <div>
+                    <p className="text-xs font-medium text-slate-300">Demo Mode</p>
+                    <p className="text-[10px] text-slate-500">
+                      {demoMode
+                        ? 'Seeded sample tenants & simulated logins enabled'
+                        : 'Production mode — real backend only, waiting for live data'}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={demoMode}
+                    onClick={() => toggleDemoMode(!demoMode)}
+                    className={`relative w-11 h-6 rounded-full transition-colors ${demoMode ? 'bg-cyan-500' : 'bg-slate-600'}`}
+                  >
+                    <span
+                      className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white transition-transform ${demoMode ? 'translate-x-5' : ''}`}
+                    />
+                  </button>
+                </div>
               </form>
 
               <div className="mt-6 pt-6 border-t border-slate-800">

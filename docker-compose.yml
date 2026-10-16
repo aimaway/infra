@@ -1,7 +1,7 @@
 services:
   # PostgreSQL Database
   db:
-    image: postgres:15-alpine
+    image: postgres:18
     container_name: infracentra-db
     environment:
       POSTGRES_USER: infracentra
@@ -10,7 +10,10 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      # Postgres 18+: mount the TOP-LEVEL dir /var/lib/postgresql (NOT .../data).
+      # The cluster now lives in a versioned subdir (/var/lib/postgresql/18/docker);
+      # mounting at .../data triggers the "unused mount/volume" fatal error.
+      - pgdata:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U infracentra -d infracentra"]
       interval: 10s
