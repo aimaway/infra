@@ -1,177 +1,463 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  Radio, RefreshCw, Plus, Trash2, Zap, ShieldAlert, Bell, Mail, MessageSquare,
+  Smartphone, Inbox as InAppIcon, GitBranch, CheckCheck, RotateCcw, BarChart3,
+  VolumeX, PlayCircle, X, AlertOctagon,
+} from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import {
-  simEvents, simDeliveries, simRules, simDlq, quietHours, analytics24h, notifTenants,
-  NotifRule, Channel, DeliveryStatus,
-} from '../../data/ticketingNotifData';
-import {
-  Bell, Radio, Mail, MessageSquare, Webhook, Users2, Hash, Zap, Shield,
-  Activity, AlertTriangle, CheckCircle2, Clock, RotateCcw, Skull, VolumeX,
-  Plus, Trash2, ToggleLeft, ToggleRight, BarChart3, Eye, Moon, Inbox,
-} from 'lucide-react';
-import {
-  ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, CartesianGrid,
-  PieChart, Pie, Cell, Legend,
-} from 'recharts';
+  alertsApi, ticketsApi, ApiError,
+  AlertRow, NotifRule, NotificationRow,
+} from '../../services/api';
 
+// ---------------------------------------------------------------------------
+// Constants shared with the backend rule schema
+// ---------------------------------------------------------------------------
+const SEVERITIES = ['critical', 'high', 'medium', 'low', 'info'];
+const SOURCES = ['siem', 'wazuh', 'snmp', 'syslog', 'api', 'nmap', 'manual'];
+const CHANNELS: { id: string; label: string; icon: React.ReactNode }[] = [
+  { id: 'in_app', label: 'In-App', icon: <InAppIcon size={14} /> },
+  { id: 'email', label: 'Email', icon: <Mail size={14} /> },
+  { id: 'sms', label: 'SMS', icon: <MessageSquare size={14} /> },
+  { id: 'webhook', label: 'Webhook', icon: <Zap size={14} /> },
+];
 const sevColor: Record<string, string> = {
-  critical: 'text-red-400 bg-red-500/15 border-red-500/30',
-  high: 'text-orange-400 bg-orange-500/15 border-orange-500/30',
-  medium: 'text-yellow-400 bg-yellow-500/15 border-yellow-500/30',
-  low: 'text-blue-400 bg-blue-500/15 border-blue-500/30',
-  info: 'text-slate-400 bg-slate-500/15 border-slate-500/30',
+  critical: 'bg-red-500/20 text-red-400 border-red-500/40',
+  high: 'bg-orange-500/20 text-orange-400 border-orange-500/40',
+  medium: 'bg-yellow-500/20 text-yellow-400 border-yellow-500/40',
+  low: 'bg-sky-500/20 text-sky-400 border-sky-500/40',
+  info: 'bg-slate-500/20 text-slate-300 border-slate-500/40',
 };
-const dStatusStyle: Record<DeliveryStatus, string> = {
-  delivered: 'text-emerald-400', acknowledged: 'text-cyan-400', queued: 'text-slate-400',
-  retrying: 'text-amber-400', dead_letter: 'text-red-400', suppressed: 'text-purple-400',
-};
-const channelIcon: Record<Channel, any> = {
-  in_app: Bell, email: Mail, sms: MessageSquare, webhook: Webhook, teams: Users2, slack: Hash,
+const notifStatusColor: Record<string, string> = {
+  sent: 'text-emerald-400', delivered: 'text-emerald-400', pending: 'text-amber-400',
+  queued: 'text-amber-400', retrying: 'text-orange-400', failed: 'text-red-400',
+  dead_letter: 'text-red-500', suppressed: 'text-slate-500', quiet_hold: 'text-purple-400', acked: 'text-cyan-400',
 };
 
-export default function NotificationEnginePage() {
-  const { user } = useAuth();
-  const [rules, setRules] = useState<NotifRule[]>(simRules);
-  const [tab, setTab] = useState<'events' | 'rules' | 'delivery' | 'analytics'>('events');
-  const [liveFeed, setLiveFeed] = useState<{ id: string; ts: string; title: string; severity: string }[]>([]);
-  const [sevFilter, setSevFilter] = useState('all');
-  const [tenantFilter, setTenantFilter] = useState('*');
-  const [newRuleName, setNewRuleName] = useState('');
-  const [newRuleSev, setNewRuleSev] = useState('high');
-  const [newRuleChannel, setNewRuleChannel] = useState<Channel>('email');
-  const [visualBuilderOpen, setVisualBuilderOpen] = useState(false);
+const fmt = (iso?: string | null) => (iso ? new Date(iso).toLocaleString() : '—');
+const ago = (iso?: string | null) => {
+  if (!iso) return '—';
+  const s = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.round(s / 60)}m`;
+  return `${Math.round(s / 3600)}h`;
+};
+const Badge: React.FC<{ className?: string; children: React.ReactNode }> = ({ className = '', children }) => (
+  <span className={`px-2 py-0.5 rounded-full text-xs font-semibold border border-transparent ${className}`}>{children}</span>
+);
 
-  // live simulated event stream every 6s
-  useEffect(() => {
-    const pool = [...simEvents];
-    const iv = setInterval(() => {
-      const e = pool[Math.floor(Math.random() * pool.length)];
-      setLiveFeed(f => [{ id: `${e.id}-${Date.now()}`, ts: new Date().toLocaleTimeString(), title: e.title, severity: e.severity }, ...f].slice(0, 8));
-    }, 6000);
-    return () => clearInterval(iv);
-  }, []);
+// ---------------------------------------------------------------------------
+// Visual rule builder — persists to POST/PATCH /api/notification-rules
+// ---------------------------------------------------------------------------
 
-  const events = useMemo(() => simEvents.filter(e =>
-    (sevFilter === 'all' || e.severity === sevFilter) &&
-    (tenantFilter === '*' || e.tenant === tenantFilter)
-  ).sort((a, b) => +new Date(b.ts) - +new Date(a.ts)), [sevFilter, tenantFilter]);
+const emptyRule: NotifRule = {
+  name: '', enabled: true, conditions: { severity: [], source: [], contains: '', min_severity: '' },
+  channels: ['in_app'], recipients: [], create_ticket: true, ticket_priority: 'p2',
+  escalate_after_minutes: 30, quiet_hours: null,
+};
 
-  const toggleRule = (id: string) => setRules(rs => rs.map(r => r.id === id ? { ...r, enabled: !r.enabled } : r));
-  const deleteRule = (id: string) => setRules(rs => rs.filter(r => r.id !== id));
-  const addRule = () => {
-    if (!newRuleName.trim()) return;
-    setRules(rs => [{
-      id: `NR-${String(rs.length + 1).padStart(2, '0')}`, name: newRuleName, enabled: true,
-      whenSeverity: [newRuleSev], whenSources: ['*'], whenTenant: '*', timeWindow: '24/7',
-      actions: [{ channel: newRuleChannel, target: 'default route', delayMin: 0 }], stormGuard: true, hits24h: 0,
-    }, ...rs]);
-    setNewRuleName(''); setVisualBuilderOpen(false);
+const RuleEditor: React.FC<{
+  rule: NotifRule; tenants: { id: number; name: string }[]; isPlatform: boolean;
+  onSave: (r: NotifRule) => Promise<void>; onClose: () => void;
+}> = ({ rule: initial, tenants, isPlatform, onSave, onClose }) => {
+  const [r, setR] = useState<NotifRule>({ ...emptyRule, ...initial, conditions: { ...emptyRule.conditions, ...(initial.conditions || {}) } });
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  const cond = r.conditions || {};
+  const setCond = (patchObj: Record<string, any>) => setR({ ...r, conditions: { ...cond, ...patchObj } });
+  const toggleIn = (key: 'severity' | 'source', v: string) => {
+    const arr: string[] = cond[key] || [];
+    setCond({ [key]: arr.includes(v) ? arr.filter(x => x !== v) : [...arr, v] });
+  };
+  const toggleCh = (v: string) => {
+    const arr = r.channels || [];
+    setR({ ...r, channels: arr.includes(v) ? arr.filter(x => x !== v) : [...arr, v] });
   };
 
-  const counts = {
-    total: simEvents.length,
-    suppressed: simEvents.filter(e => e.suppressed).length,
-    correlated: simEvents.filter(e => e.correlatedGroup).length,
-    dlq: simDlq.length,
+  const inp = 'w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 focus:border-cyan-500 outline-none';
+  const lbl = 'block text-xs font-semibold text-slate-400 mb-1 uppercase tracking-wide';
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault(); setBusy(true); setErr('');
+    try { await onSave(r); onClose(); }
+    catch (ex: any) { setErr(ex.message); }
+    finally { setBusy(false); }
   };
 
   return (
-    <div className="p-6 space-y-6">
-      {/* Header */}
-      <div className="flex flex-wrap items-center justify-between gap-4">
-        <div>
-          <div className="flex items-center gap-3">
-            <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/20"><Radio className="w-6 h-6 text-amber-400" /></div>
-            <h1 className="text-3xl font-bold text-white">Notification & Event Intelligence</h1>
-            <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-purple-500/20 text-purple-300 border border-purple-500/30 flex items-center gap-1"><Zap className="w-3 h-3" />Event-driven · Simulated</span>
-          </div>
-          <p className="text-slate-400 mt-1">Routing rules · correlation & storm protection · delivery diagnostics · acknowledgements</p>
+    <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4" onClick={onClose}>
+      <form onSubmit={submit} onClick={e => e.stopPropagation()}
+        className="bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto p-6 space-y-4">
+        <div className="flex items-center justify-between">
+          <h2 className="text-lg font-bold text-white flex items-center gap-2"><Zap className="text-cyan-400" size={20} /> {initial.id ? 'Edit' : 'New'} Notification Rule</h2>
+          <button type="button" onClick={onClose} className="text-slate-400 hover:text-white"><X size={20} /></button>
         </div>
-        <div className="flex items-center gap-2 text-sm">
-          <select value={tenantFilter} onChange={e => setTenantFilter(e.target.value)} className="bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-slate-300">
-            <option value="*">{user?.role === 'platform_admin' ? 'All tenants' : 'My organization'}</option>
-            {notifTenants.map(tn => <option key={tn} value={tn}>{tn}</option>)}
+        <div>
+          <label className={lbl}>Rule name *</label>
+          <input className={inp} required value={r.name} onChange={e => setR({ ...r, name: e.target.value })} placeholder="e.g. Critical firewall events → SMS + auto-ticket P1" />
+        </div>
+        {isPlatform && (
+          <div>
+            <label className={lbl}>Scope</label>
+            <select className={inp} value={r.org_id ?? ''} onChange={e => setR({ ...r, org_id: e.target.value === '' ? null : Number(e.target.value) })}>
+              <option value="">Global (all tenants)</option>
+              {tenants.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+            </select>
+          </div>
+        )}
+
+        <div className="bg-slate-800/40 rounded-lg p-4 space-y-3">
+          <p className={lbl}>When an event matches (IF)</p>
+          <div>
+            <p className="text-xs text-slate-500 mb-1">Severity</p>
+            <div className="flex flex-wrap gap-2">
+              {SEVERITIES.map(s => (
+                <button type="button" key={s} onClick={() => toggleIn('severity', s)}
+                  className={`px-2.5 py-1 rounded-full text-xs capitalize ${(cond.severity || []).includes(s) ? 'bg-cyan-600 text-white' : 'bg-slate-700 text-slate-300'}`}>{s}</button>
+              ))}
+            </div>
+          </div>
+          <div>
+            <p className="text-xs text-slate-500 mb-1">Source</p>
+            <div className="flex flex-wrap gap-2">
+              {SOURCES.map(s => (
+                <button type="button" key={s} onClick={() => toggleIn('source', s)}
+                  className={`px-2.5 py-1 rounded-full text-xs ${(cond.source || []).includes(s) ? 'bg-cyan-600 text-white' : 'bg-slate-700 text-slate-300'}`}>{s}</button>
+              ))}
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div><label className="text-xs text-slate-500">Title contains</label>
+              <input className={inp} value={cond.contains || ''} onChange={e => setCond({ contains: e.target.value })} placeholder="ransomware" /></div>
+            <div><label className="text-xs text-slate-500">Min severity</label>
+              <select className={inp} value={cond.min_severity || ''} onChange={e => setCond({ min_severity: e.target.value })}>
+                <option value="">Any</option>{SEVERITIES.slice().reverse().map(s => <option key={s} value={s}>{s}+</option>)}
+              </select></div>
+          </div>
+        </div>
+
+        <div className="bg-slate-800/40 rounded-lg p-4 space-y-3">
+          <p className={lbl}>Then (DO)</p>
+          <div>
+            <p className="text-xs text-slate-500 mb-1">Notify via channels</p>
+            <div className="flex flex-wrap gap-2">
+              {CHANNELS.map(c => (
+                <button type="button" key={c.id} onClick={() => toggleCh(c.id)}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold ${(r.channels || []).includes(c.id) ? 'bg-cyan-600 text-white' : 'bg-slate-700 text-slate-300'}`}>
+                  {c.icon}{c.label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div>
+            <label className="text-xs text-slate-500">Recipients (comma separated emails / phone numbers / webhook URLs)</label>
+            <input className={inp} value={(r.recipients || []).join(', ')}
+              onChange={e => setR({ ...r, recipients: e.target.value.split(',').map(x => x.trim()).filter(Boolean) })}
+              placeholder="soc@client.com, +15551234567" />
+          </div>
+          <div className="flex items-center gap-6">
+            <label className="flex items-center gap-2 text-sm text-slate-200">
+              <input type="checkbox" checked={!!r.create_ticket} onChange={e => setR({ ...r, create_ticket: e.target.checked })} className="accent-cyan-500" />
+              <GitBranch size={15} className="text-purple-400" /> Auto-create ticket from alert
+            </label>
+            {r.create_ticket && (
+              <select className="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-sm text-slate-200" value={r.ticket_priority}
+                onChange={e => setR({ ...r, ticket_priority: e.target.value })}>
+                {['p1', 'p2', 'p3', 'p4'].map(p => <option key={p} value={p}>Ticket {p.toUpperCase()}</option>)}
+              </select>
+            )}
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div><label className="text-xs text-slate-500">Escalate after (minutes, 0 = never)</label>
+              <input type="number" min={0} className={inp} value={r.escalate_after_minutes}
+                onChange={e => setR({ ...r, escalate_after_minutes: Number(e.target.value) })} /></div>
+            <div><label className="text-xs text-slate-500">Quiet hours (HH:MM-HH:MM, blank = off)</label>
+              <input className={inp} placeholder="22:00-07:00" value={r.quiet_hours?.range || ''}
+                onChange={e => setR({ ...r, quiet_hours: e.target.value.trim() ? { range: e.target.value.trim() } : null })} /></div>
+          </div>
+        </div>
+
+        {err && <p className="text-red-400 text-sm">{err}</p>}
+        <div className="flex justify-end gap-3">
+          <button type="button" onClick={onClose} className="px-4 py-2 rounded-lg text-sm text-slate-300 bg-slate-800 hover:bg-slate-700">Cancel</button>
+          <button type="submit" disabled={busy} className="px-4 py-2 rounded-lg text-sm font-semibold bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-white">
+            {busy ? 'Saving…' : 'Save Rule'}</button>
+        </div>
+      </form>
+    </div>
+  );
+};
+
+// ---------------------------------------------------------------------------
+// Test-event modal — posts a REAL alert through the production pipeline
+// ---------------------------------------------------------------------------
+
+const SimulateAlertModal: React.FC<{ onClose: () => void; onDone: () => void; isPlatform: boolean; tenants: { id: number; name: string }[] }>
+  = ({ onClose, onDone, isPlatform, tenants }) => {
+  const [title, setTitle] = useState('Unauthorized SSH login brute-force detected');
+  const [severity, setSeverity] = useState('high');
+  const [source, setSource] = useState('wazuh');
+  const [resource, setResource] = useState('FW-EDGE-01');
+  const [orgId, setOrgId] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState('');
+  const [err, setErr] = useState('');
+
+  const send = async () => {
+    setBusy(true); setErr(''); setResult('');
+    try {
+      const res = await alertsApi.ingest({
+        title, severity, source, resource,
+        description: `Simulated event for demo purposes. Resource: ${resource}`,
+        org_id: isPlatform && orgId ? Number(orgId) : undefined,
+        raw_payload: { simulated: true },
+      });
+      setResult(res.pipeline?.ticket_uid
+        ? `✓ Alert ingested → rule matched → ticket ${res.pipeline.ticket_uid} auto-created · ${res.pipeline.notifications?.length ?? 0} notification(s) dispatched`
+        : `✓ Alert ingested · correlated ×${res.alert.correlated_count}${res.alert.storm_suppressed ? ' · storm-suppressed' : ''} · ${res.pipeline?.notifications?.length ?? 0} notification(s) dispatched`);
+      setTimeout(() => { onDone(); onClose(); }, 1500);
+    } catch (ex: any) { setErr(ex.message); }
+    finally { setBusy(false); }
+  };
+
+  const inp = 'w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none focus:border-cyan-500';
+  return (
+    <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4" onClick={onClose}>
+      <div onClick={e => e.stopPropagation()} className="bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-md p-6 space-y-4">
+        <h2 className="text-lg font-bold text-white flex items-center gap-2"><PlayCircle className="text-purple-400" size={20} /> Send Test Event</h2>
+        <p className="text-xs text-slate-400">This posts a real payload to <code className="text-cyan-400">POST /api/alerts</code> and runs it through the full production pipeline: correlation → storm protection → routing → auto-ticketing.</p>
+        <input className={inp} value={title} onChange={e => setTitle(e.target.value)} placeholder="Alert title" />
+        <div className="grid grid-cols-2 gap-3">
+          <select className={inp} value={severity} onChange={e => setSeverity(e.target.value)}>
+            {SEVERITIES.map(s => <option key={s} value={s}>{s}</option>)}
+          </select>
+          <select className={inp} value={source} onChange={e => setSource(e.target.value)}>
+            {SOURCES.map(s => <option key={s} value={s}>{s}</option>)}
           </select>
         </div>
-      </div>
-
-      {/* KPI strip */}
-      <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-7 gap-4">
-        {[
-          { l: 'Events (24h)', v: analytics24h.totalEvents, i: Activity, c: 'text-cyan-400' },
-          { l: 'Alerts delivered', v: `${analytics24h.deliveredPct}%`, i: CheckCircle2, c: 'text-emerald-400' },
-          { l: 'Mean ack time', v: `${analytics24h.meanAckMin} min`, i: Clock, c: 'text-amber-400' },
-          { l: 'Storms blocked', v: analytics24h.stormsDetected, i: VolumeX, c: 'text-purple-400' },
-          { l: 'Correlation clusters', v: counts.correlated, i: Shield, c: 'text-sky-400' },
-          { l: 'Dead-letter items', v: counts.dlq, i: Skull, c: 'text-red-400' },
-          { l: 'Quiet-hours digest', v: quietHours.digestsQueued, i: Moon, c: 'text-indigo-400' },
-        ].map(k => (
-          <div key={k.l} className="bg-slate-900/60 border border-slate-800 rounded-xl p-4">
-            <k.i className={`w-5 h-5 ${k.c}`} />
-            <div className="text-xl font-bold text-white mt-2">{k.v}</div>
-            <div className="text-[11px] text-slate-500">{k.l}</div>
-          </div>
-        ))}
-      </div>
-
-      {/* Live feed ticker */}
-      <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-4">
-        <div className="flex items-center gap-2 mb-2">
-          <span className="relative flex h-2.5 w-2.5"><span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" /><span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500" /></span>
-          <h3 className="text-sm font-semibold text-white">Live event stream (simulated)</h3>
-        </div>
-        <div className="space-y-1">
-          {liveFeed.length === 0 && <div className="text-xs text-slate-500 italic">Awaiting next simulated event…</div>}
-          {liveFeed.map(f => (
-            <div key={f.id} className="flex items-center gap-3 text-xs animate-pulse-none">
-              <span className="text-slate-600 font-mono">{f.ts}</span>
-              <span className={`px-1.5 rounded border text-[10px] uppercase ${sevColor[f.severity]}`}>{f.severity}</span>
-              <span className="text-slate-300 truncate">{f.title}</span>
-            </div>
-          ))}
+        <input className={inp} value={resource} onChange={e => setResource(e.target.value)} placeholder="Resource / asset" />
+        {isPlatform && (
+          <select className={inp} value={orgId} onChange={e => setOrgId(e.target.value)}>
+            <option value="">Tenant…</option>{tenants.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+          </select>
+        )}
+        {err && <p className="text-red-400 text-sm">{err}</p>}
+        {result && <p className="text-emerald-400 text-sm">{result}</p>}
+        <div className="flex justify-end gap-3">
+          <button onClick={onClose} className="px-4 py-2 rounded-lg text-sm text-slate-300 bg-slate-800 hover:bg-slate-700">Close</button>
+          <button onClick={send} disabled={busy} className="px-4 py-2 rounded-lg text-sm font-semibold bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white">
+            {busy ? 'Ingesting…' : 'Send Through Pipeline'}</button>
         </div>
       </div>
+    </div>
+  );
+};
 
-      {/* Tabs */}
-      <div className="flex flex-wrap gap-2">
-        {([['events', 'Events & Correlation', AlertTriangle], ['rules', 'Rule Builder', Zap], ['delivery', 'Delivery Diagnostics', Inbox], ['analytics', 'Analytics', BarChart3]] as const).map(([id, label, Icon]) => (
-          <button key={id} onClick={() => setTab(id)}
-            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition ${tab === id ? 'bg-amber-500/15 text-amber-300 border border-amber-500/30' : 'bg-slate-900 text-slate-400 border border-slate-800 hover:text-slate-200'}`}>
-            <Icon className="w-4 h-4" />{label}
+// ---------------------------------------------------------------------------
+// Main page
+// ---------------------------------------------------------------------------
+
+const NotificationEnginePage: React.FC = () => {
+  const { user } = useAuth();
+  const isPlatform = user?.role === 'platform_admin';
+  const [tab, setTab] = useState<'events' | 'rules' | 'delivery' | 'analytics'>('events');
+  const [alerts, setAlerts] = useState<AlertRow[]>([]);
+  const [rules, setRules] = useState<NotifRule[]>([]);
+  const [notifs, setNotifs] = useState<NotificationRow[]>([]);
+  const [analytics, setAnalytics] = useState<Record<string, any>>({});
+  const [tenants, setTenants] = useState<{ id: number; name: string }[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [editing, setEditing] = useState<NotifRule | null>(null);
+  const [showSim, setShowSim] = useState(false);
+  const [autoRefresh, setAutoRefresh] = useState(true);
+
+  const load = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true);
+    setError('');
+    try {
+      const [a, rl, n] = await Promise.all([alertsApi.list(), alertsApi.rules(), alertsApi.notifications()]);
+      setAlerts(a); setRules(rl); setNotifs(n);
+      alertsApi.analytics().then(setAnalytics).catch(() => {});
+      if (isPlatform) {
+        ticketsApi.tenants().then(setTenants).catch(() => {});
+      }
+    } catch (ex: any) {
+      setError(ex instanceof ApiError ? ex.message : 'Backend unreachable — is the API container running?');
+    } finally { setLoading(false); }
+  }, [isPlatform]);
+
+  useEffect(() => { load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
+  useEffect(() => {
+    if (!autoRefresh) return;
+    const t = setInterval(() => load(true), 8000);   // live "waiting for data" feed
+    return () => clearInterval(t);
+  }, [autoRefresh, load]);
+
+  const saveRule = async (r: NotifRule) => {
+    if (r.id) await alertsApi.updateRule(r.id, r);
+    else await alertsApi.createRule({ ...r, org_id: isPlatform ? r.org_id ?? null : null });
+    await load(true);
+  };
+
+  const stats = useMemo(() => ({
+    events: alerts.length,
+    unacked: alerts.filter(a => !a.acked_by).length,
+    suppressed: alerts.filter(a => a.storm_suppressed).length,
+    autoTickets: alerts.filter(a => a.ticket_uid).length,
+    dlq: notifs.filter(n => n.status === 'dead_letter' || n.status === 'failed').length,
+    sent: notifs.filter(n => ['sent', 'delivered', 'acked'].includes(n.status)).length,
+  }), [alerts, notifs]);
+
+  const chIcon = (c: string) => c === 'email' ? <Mail size={13} /> : c === 'sms' ? <Smartphone size={13} /> : c === 'webhook' ? <Zap size={13} /> : <InAppIcon size={13} />;
+
+  return (
+    <div className="p-6 space-y-5">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-bold text-white flex items-center gap-2"><Radio className="text-cyan-400" /> Notification & Event Intelligence</h1>
+          <p className="text-sm text-slate-400">Live event pipeline: ingestion → correlation → routing → delivery diagnostics. Every alert that matches a rule creates a ticket automatically.</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <label className="flex items-center gap-2 text-xs text-slate-400">
+            <input type="checkbox" checked={autoRefresh} onChange={e => setAutoRefresh(e.target.checked)} className="accent-cyan-500" /> Live feed
+          </label>
+          <button onClick={() => load()} className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300"><RefreshCw size={16} className={loading ? 'animate-spin' : ''} /></button>
+          <button onClick={() => setShowSim(true)} className="flex items-center gap-2 px-4 py-2 rounded-lg bg-purple-600 hover:bg-purple-500 text-white text-sm font-semibold"><PlayCircle size={16} /> Send Test Event</button>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
+        <Kpi label="Events" value={stats.events} color="text-cyan-400" />
+        <Kpi label="Unacked" value={stats.unacked} color="text-amber-400" />
+        <Kpi label="Storm-Suppressed" value={stats.suppressed} color="text-slate-400" />
+        <Kpi label="Auto-Tickets" value={stats.autoTickets} color="text-purple-400" />
+        <Kpi label="Delivered" value={stats.sent} color="text-emerald-400" />
+        <Kpi label="Dead Letters" value={stats.dlq} color="text-red-400" />
+      </div>
+
+      {error && <div className="bg-red-500/10 border border-red-500/40 rounded-lg p-3 text-sm text-red-300 flex items-center gap-2"><ShieldAlert size={16} />{error}</div>}
+
+      <div className="flex gap-1 border-b border-slate-700">
+        {(['events', 'rules', 'delivery', 'analytics'] as const).map(t => (
+          <button key={t} onClick={() => setTab(t)}
+            className={`px-4 py-2 text-sm capitalize ${tab === t ? 'text-cyan-400 border-b-2 border-cyan-400' : 'text-slate-400 hover:text-white'}`}>
+            {t === 'delivery' ? 'Delivery Diagnostics' : t === 'analytics' ? 'Analytics' : t}
           </button>
         ))}
       </div>
 
-      {/* ---------------- EVENTS ---------------- */}
+      {/* EVENTS FEED */}
       {tab === 'events' && (
-        <div className="space-y-4">
-          <div className="flex gap-3 flex-wrap">
-            <select value={sevFilter} onChange={e => setSevFilter(e.target.value)} className="bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-300">
-              {['all', 'critical', 'high', 'medium', 'low', 'info'].map(s => <option key={s} value={s}>{s}</option>)}
-            </select>
-            <div className="text-xs text-slate-500 self-center flex items-center gap-2"><VolumeX className="w-4 h-4 text-purple-400" />{counts.suppressed} events suppressed by storm protection · dedup collapses repeated raw events into one notification</div>
+        <div className="bg-slate-800/40 rounded-xl overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead><tr className="text-left text-xs uppercase text-slate-500 border-b border-slate-700">
+              <th className="px-4 py-3">UID</th><th className="px-4 py-3">Title</th><th className="px-4 py-3">Severity</th>
+              <th className="px-4 py-3">Source</th><th className="px-4 py-3">Resource</th><th className="px-4 py-3">Correlation</th>
+              <th className="px-4 py-3">Ticket</th><th className="px-4 py-3">Age</th><th className="px-4 py-3" /></tr></thead>
+            <tbody>
+              {alerts.length === 0 && !loading && (
+                <tr><td colSpan={9} className="px-4 py-10 text-center">
+                  <Bell className="mx-auto text-slate-600 mb-2" size={28} />
+                  <p className="text-slate-400 mb-1">Listening for events — nothing has arrived yet.</p>
+                  <p className="text-xs text-slate-500 mb-4">Real integrations (Wazuh, SNMP traps, syslog, SIEM webhooks) POST to <code className="text-cyan-400">/api/alerts</code>. Click “Send Test Event” to see exactly how live data will look and behave.</p>
+                  <button onClick={() => setShowSim(true)} className="px-4 py-2 rounded-lg bg-purple-600 hover:bg-purple-500 text-white text-sm font-semibold inline-flex items-center gap-2"><PlayCircle size={14} /> Send Test Event</button>
+                </td></tr>
+              )}
+              {alerts.map(a => (
+                <tr key={a.id} className="border-b border-slate-700/50 hover:bg-slate-700/30">
+                  <td className="px-4 py-3 font-mono text-xs text-slate-400">{a.uid}</td>
+                  <td className="px-4 py-3 text-slate-200">
+                    {a.title}
+                    {a.storm_suppressed && <Badge className="ml-2 bg-slate-600/40 text-slate-300"><VolumeX size={10} className="inline mr-0.5" />storm guard</Badge>}
+                  </td>
+                  <td className="px-4 py-3"><Badge className={sevColor[a.severity]}>{a.severity}</Badge></td>
+                  <td className="px-4 py-3 text-slate-400">{a.source}</td>
+                  <td className="px-4 py-3 text-slate-400">{a.resource || '—'}</td>
+                  <td className="px-4 py-3 text-slate-400">{a.correlated_count > 1 ? `×${a.correlated_count} dup` : 'unique'}</td>
+                  <td className="px-4 py-3">{a.ticket_uid
+                    ? <Badge className="bg-purple-500/20 text-purple-300 border-purple-500/30"><GitBranch size={11} className="inline mr-1" />{a.ticket_uid}</Badge>
+                    : <span className="text-slate-600">—</span>}</td>
+                  <td className="px-4 py-3 text-slate-500">{ago(a.created_at)}</td>
+                  <td className="px-4 py-3">
+                    {!a.acked_by
+                      ? <button onClick={() => alertsApi.ack(a.id).then(() => load(true))} className="flex items-center gap-1 px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-xs text-slate-200"><CheckCheck size={13} /> Ack</button>
+                      : <span className="text-xs text-emerald-400">✓ {a.acked_by}</span>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* RULES */}
+      {tab === 'rules' && (
+        <div className="space-y-3">
+          <div className="flex justify-end">
+            <button onClick={() => setEditing({ ...emptyRule })} className="flex items-center gap-2 px-4 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-sm font-semibold"><Plus size={16} /> New Rule</button>
           </div>
-          <div className="bg-slate-900/60 border border-slate-800 rounded-xl overflow-x-auto">
+          {rules.length === 0 && <p className="text-sm text-slate-500 bg-slate-800/40 rounded-xl p-6 text-center">No routing rules yet. Rules decide which events notify whom — and which automatically open a ticket.</p>}
+          {rules.map(r => {
+            const c = r.conditions || {};
+            return (
+              <div key={r.id} className="bg-slate-800/50 rounded-xl p-4 flex flex-wrap items-center gap-3">
+                <div className="flex-1 min-w-64">
+                  <p className="text-slate-100 font-semibold text-sm">{r.name} {!r.enabled && <Badge className="bg-slate-600/40 text-slate-400">disabled</Badge>}
+                    {r.org_id == null && isPlatform && <Badge className="ml-2 bg-cyan-500/20 text-cyan-300">global</Badge>}</p>
+                  <p className="text-xs text-slate-400 mt-1">
+                    IF [{(c.severity || []).join(',') || 'any sev'}] · src[{(c.source || []).join(',') || 'any'}]{c.contains ? ` · contains "${c.contains}"` : ''}{c.min_severity ? ` · ≥${c.min_severity}` : ''}
+                  </p>
+                  <p className="text-xs text-slate-400">THEN {(r.channels || []).map(ch => <span key={ch} className="inline-flex items-center gap-1 mr-2">{chIcon(ch)}{ch}</span>)}
+                    {r.create_ticket && <span className="text-purple-300">· auto-ticket {(r.ticket_priority || '').toUpperCase()}</span>}
+                    {r.escalate_after_minutes > 0 && <span className="text-amber-300"> · escalate after {r.escalate_after_minutes}m</span>}
+                    {r.quiet_hours?.range && <span className="text-slate-500"> · quiet {r.quiet_hours.range}</span>}
+                  </p>
+                  {(r.recipients || []).length > 0 && <p className="text-[11px] text-slate-500 mt-1">→ {(r.recipients || []).join(', ')}</p>}
+                </div>
+                <div className="flex gap-2">
+                  <button onClick={() => alertsApi.updateRule(r.id!, { enabled: !r.enabled }).then(() => load(true))}
+                    className={`px-3 py-1.5 rounded text-xs font-semibold ${r.enabled ? 'bg-emerald-600/30 text-emerald-300' : 'bg-slate-700 text-slate-400'}`}>{r.enabled ? 'ON' : 'OFF'}</button>
+                  <button onClick={() => setEditing(r)} className="px-3 py-1.5 rounded text-xs bg-slate-700 hover:bg-slate-600 text-slate-200">Edit</button>
+                  <button onClick={() => alertsApi.deleteRule(r.id!).then(() => load(true))} className="p-1.5 rounded text-xs bg-red-600/30 hover:bg-red-600/50 text-red-300"><Trash2 size={14} /></button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* DELIVERY DIAGNOSTICS */}
+      {tab === 'delivery' && (
+        <div className="space-y-3">
+          <div className="flex justify-end">
+            <button onClick={() => alertsApi.retryDeadLetters().then((res: any) => { setError(`Requeued ${res?.requeued ?? 0} dead letter(s).`); load(true); }).catch(e => setError(e.message))}
+              className="flex items-center gap-2 px-3 py-2 rounded-lg bg-orange-600/80 hover:bg-orange-500 text-white text-xs font-semibold"><RotateCcw size={14} /> Retry Dead Letters</button>
+          </div>
+          <div className="bg-slate-800/40 rounded-xl overflow-x-auto">
             <table className="w-full text-sm">
-              <thead><tr className="text-left text-slate-500 border-b border-slate-800">
-                <th className="px-4 py-3">Event</th><th className="px-4 py-3">Severity</th><th className="px-4 py-3">Source</th>
-                {user?.role === 'platform_admin' && <th className="px-4 py-3">Tenant</th>}
-                <th className="px-4 py-3">Rule</th><th className="px-4 py-3">Correlation</th><th className="px-4 py-3">Dedup</th><th className="px-4 py-3">When</th>
-              </tr></thead>
+              <thead><tr className="text-left text-xs uppercase text-slate-500 border-b border-slate-700">
+                <th className="px-4 py-3">Channel</th><th className="px-4 py-3">Recipient</th><th className="px-4 py-3">Subject</th>
+                <th className="px-4 py-3">Severity</th><th className="px-4 py-3">Status</th><th className="px-4 py-3">Attempts</th>
+                <th className="px-4 py-3">Last Error</th><th className="px-4 py-3">Sent</th><th className="px-4 py-3">Ack</th></tr></thead>
               <tbody>
-                {events.map(e => (
-                  <tr key={e.id} className="border-b border-slate-800/60 hover:bg-slate-800/30">
-                    <td className="px-4 py-3">
-                      <div className="text-slate-200 max-w-[300px] truncate">{e.suppressed && <VolumeX className="w-3.5 h-3.5 text-purple-400 inline mr-1" />}{e.title}</div>
-                      <div className="text-[10px] font-mono text-slate-600">{e.id}</div>
+                {notifs.length === 0 && !loading && <tr><td colSpan={9} className="px-4 py-8 text-center text-slate-500">No notifications dispatched yet — they appear here the moment real events flow in.</td></tr>}
+                {notifs.map(n => (
+                  <tr key={n.id} className="border-b border-slate-700/50">
+                    <td className="px-4 py-3 text-slate-300">{chIcon(n.channel)} {n.channel.replace('_', ' ')}</td>
+                    <td className="px-4 py-3 text-slate-400 font-mono text-xs">{n.recipient}</td>
+                    <td className="px-4 py-3 text-slate-200 max-w-64 truncate">{n.subject}</td>
+                    <td className="px-4 py-3"><Badge className={sevColor[n.severity]}>{n.severity}</Badge></td>
+                    <td className={`px-4 py-3 text-xs font-semibold uppercase ${notifStatusColor[n.status] || 'text-slate-400'}`}>{n.status}</td>
+                    <td className="px-4 py-3 text-slate-400">{n.attempts}</td>
+                    <td className="px-4 py-3 text-red-400 text-xs max-w-40 truncate">{n.last_error || '—'}</td>
+                    <td className="px-4 py-3 text-slate-500 text-xs">{fmt(n.sent_at)}</td>
+                    <td className="px-4 py-3 text-xs">
+                      {n.acked_by ? <span className="text-emerald-400">✓ {n.acked_by}</span>
+                        : ['sent', 'delivered'].includes(n.status)
+                          ? <button onClick={() => alertsApi.ackNotification(n.id).then(() => load(true))} className="text-cyan-400 hover:underline">Ack</button>
+                          : '—'}
                     </td>
-                    <td className="px-4 py-3"><span className={`px-2 py-0.5 rounded border text-xs uppercase ${sevColor[e.severity]}`}>{e.severity}</span></td>
-                    <td className="px-4 py-3 text-slate-400 font-mono text-xs">{e.source}</td>
-                    {user?.role === 'platform_admin' && <td className="px-4 py-3 text-slate-300 text-xs">{e.tenant}</td>}
-                    <td className="px-4 py-3 text-cyan-400 font-mono text-xs">{e.ruleId}</td>
-                    <td className="px-4 py-3">{e.correlatedGroup ? <span className="text-sky-400 font-mono text-xs">{e.correlatedGroup}</span> : <span className="text-slate-600 text-xs">—</span>}</td>
-                    <td className="px-4 py-3 text-slate-300 text-xs">{e.dedupCount > 0 ? `×${e.dedupCount + 1}` : '—'}</td>
-                    <td className="px-4 py-3 text-slate-500 text-xs whitespace-nowrap">{new Date(e.ts).toLocaleString()}</td>
                   </tr>
                 ))}
               </tbody>
@@ -180,188 +466,41 @@ export default function NotificationEnginePage() {
         </div>
       )}
 
-      {/* ---------------- RULES ---------------- */}
-      {tab === 'rules' && (
-        <div className="space-y-4">
-          <div className="flex items-center justify-between">
-            <p className="text-sm text-slate-400">Visual rule builder — WHEN conditions route to THEN actions (all simulated).</p>
-            <button onClick={() => setVisualBuilderOpen(v => !v)} className="flex items-center gap-2 px-4 py-2 rounded-lg bg-amber-500/20 border border-amber-500/30 text-amber-300 text-sm font-medium hover:bg-amber-500/30">
-              <Plus className="w-4 h-4" />New rule
-            </button>
-          </div>
-
-          {visualBuilderOpen && (
-            <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-5 grid md:grid-cols-4 gap-4 items-end">
-              <div>
-                <label className="text-xs text-slate-400 block mb-1">Rule name</label>
-                <input value={newRuleName} onChange={e => setNewRuleName(e.target.value)} placeholder="e.g. Critical DB → NOC" className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200" />
-              </div>
-              <div>
-                <label className="text-xs text-slate-400 block mb-1">WHEN severity ≥</label>
-                <select value={newRuleSev} onChange={e => setNewRuleSev(e.target.value)} className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200">
-                  {['critical', 'high', 'medium', 'low', 'info'].map(s => <option key={s} value={s}>{s}</option>)}
-                </select>
-              </div>
-              <div>
-                <label className="text-xs text-slate-400 block mb-1">THEN send via</label>
-                <select value={newRuleChannel} onChange={e => setNewRuleChannel(e.target.value as Channel)} className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200">
-                  {(Object.keys(channelIcon) as Channel[]).map(c => <option key={c} value={c}>{c.replace(/_/g, ' ')}</option>)}
-                </select>
-              </div>
-              <button onClick={addRule} className="py-2 rounded-lg bg-emerald-500/20 border border-emerald-500/30 text-emerald-300 text-sm font-medium hover:bg-emerald-500/30">Save rule (simulated)</button>
-            </div>
-          )}
-
-          <div className="grid lg:grid-cols-2 gap-4">
-            {rules.map(r => (
-              <div key={r.id} className={`rounded-xl border p-4 space-y-3 ${r.enabled ? 'border-slate-700 bg-slate-900/60' : 'border-slate-800 bg-slate-900/30 opacity-60'}`}>
-                <div className="flex items-start justify-between gap-2">
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <span className="font-mono text-xs text-cyan-400">{r.id}</span>
-                      <h3 className="text-sm font-semibold text-white">{r.name}</h3>
-                    </div>
-                    <div className="text-[11px] text-slate-500 mt-0.5">window: {r.timeWindow} · tenant: {r.whenTenant} · hits 24h: {r.hits24h}</div>
-                  </div>
-                  <div className="flex items-center gap-1">
-                    <button onClick={() => toggleRule(r.id)} className="text-slate-400 hover:text-white">{r.enabled ? <ToggleRight className="w-6 h-6 text-emerald-400" /> : <ToggleLeft className="w-6 h-6" />}</button>
-                    <button onClick={() => deleteRule(r.id)} className="p-1 text-slate-600 hover:text-red-400"><Trash2 className="w-4 h-4" /></button>
-                  </div>
-                </div>
-                {/* visual pipeline */}
-                <div className="flex flex-wrap items-center gap-2 text-xs">
-                  <span className="px-2 py-1 rounded bg-red-500/10 border border-red-500/20 text-red-300">WHEN sev ∈ [{r.whenSeverity.join(', ')}]</span>
-                  <span className="text-slate-600">→</span>
-                  <span className="px-2 py-1 rounded bg-sky-500/10 border border-sky-500/20 text-sky-300">src {r.whenSources.join('/')}</span>
-                  <span className="text-slate-600">→</span>
-                  {r.actions.map((a, i) => {
-                    const Icon = channelIcon[a.channel];
-                    return <span key={i} className="px-2 py-1 rounded bg-amber-500/10 border border-amber-500/20 text-amber-300 flex items-center gap-1"><Icon className="w-3 h-3" />{a.channel.replace(/_/g, ' ')}{a.delayMin > 0 ? ` +${a.delayMin}m` : ''}</span>;
-                  })}
-                  {r.stormGuard && <span className="px-2 py-1 rounded bg-purple-500/10 border border-purple-500/20 text-purple-300 flex items-center gap-1"><VolumeX className="w-3 h-3" />storm guard</span>}
-                  {r.escalateAfterMin && <span className="px-2 py-1 rounded bg-orange-500/10 border border-orange-500/20 text-orange-300 flex items-center gap-1"><RotateCcw className="w-3 h-3" />escalate after {r.escalateAfterMin}m unacked</span>}
-                </div>
-              </div>
-            ))}
-          </div>
-
-          <div className="rounded-xl border border-indigo-500/30 bg-indigo-500/5 p-4 flex items-start gap-3">
-            <Moon className="w-5 h-5 text-indigo-400 flex-shrink-0 mt-0.5" />
-            <div className="text-sm">
-              <div className="font-semibold text-white">Quiet hours — {quietHours.enabled ? 'active' : 'off'}</div>
-              <div className="text-slate-400 text-xs mt-1">{quietHours.schedule}. Exempt severities: {quietHours.exemptSeverities.join(', ')}. {quietHours.digestsQueued} notifications batched into morning digest.</div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ---------------- DELIVERY DIAGNOSTICS ---------------- */}
-      {tab === 'delivery' && (
-        <div className="space-y-6">
-          <div className="bg-slate-900/60 border border-slate-800 rounded-xl overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead><tr className="text-left text-slate-500 border-b border-slate-800">
-                <th className="px-4 py-3">Delivery</th><th className="px-4 py-3">Channel</th><th className="px-4 py-3">Target</th>
-                <th className="px-4 py-3">Status</th><th className="px-4 py-3">Attempts</th><th className="px-4 py-3">Latency</th>
-                <th className="px-4 py-3">Ack</th><th className="px-4 py-3">Next retry</th>
-              </tr></thead>
-              <tbody>
-                {simDeliveries.slice(0, 40).map(d => {
-                  const Icon = channelIcon[d.channel];
-                  return (
-                    <tr key={d.id} className="border-b border-slate-800/60">
-                      <td className="px-4 py-3 font-mono text-[11px] text-slate-500">{d.id}<div className="text-[10px]">{d.eventId}</div></td>
-                      <td className="px-4 py-3"><span className="flex items-center gap-1.5 text-slate-300 text-xs capitalize"><Icon className="w-3.5 h-3.5 text-slate-500" />{d.channel.replace(/_/g, ' ')}</span></td>
-                      <td className="px-4 py-3 text-slate-400 text-xs max-w-[220px] truncate">{d.target}</td>
-                      <td className={`px-4 py-3 text-xs font-medium capitalize flex items-center gap-1 ${dStatusStyle[d.status]}`}>
-                        {d.status === 'delivered' || d.status === 'acknowledged' ? <CheckCircle2 className="w-3.5 h-3.5" />
-                          : d.status === 'dead_letter' ? <Skull className="w-3.5 h-3.5" />
-                            : d.status === 'retrying' ? <RotateCcw className="w-3.5 h-3.5" />
-                              : d.status === 'suppressed' ? <VolumeX className="w-3.5 h-3.5" /> : <Clock className="w-3.5 h-3.5" />}
-                        {d.status.replace(/_/g, ' ')}
-                      </td>
-                      <td className="px-4 py-3 text-slate-300 text-xs">{d.attempts}/5</td>
-                      <td className="px-4 py-3 text-slate-400 text-xs">{d.latencyMs >= 1000 ? `${(d.latencyMs / 1000).toFixed(1)}s` : `${d.latencyMs}ms`}</td>
-                      <td className="px-4 py-3 text-xs">{d.ackBy ? <span className="text-cyan-400 flex items-center gap-1"><Eye className="w-3 h-3" />{d.ackBy}</span> : <span className="text-slate-600">—</span>}</td>
-                      <td className="px-4 py-3 text-xs">{d.nextRetry ? <span className="text-amber-400">{new Date(d.nextRetry).toLocaleTimeString()}</span> : <span className="text-slate-600">—</span>}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-
-          <div className="rounded-xl border border-red-500/30 bg-red-500/5 p-4">
-            <h3 className="font-semibold text-red-300 flex items-center gap-2 mb-3"><Skull className="w-5 h-5" />Dead-letter queue ({simDlq.length})</h3>
-            <div className="space-y-2">
-              {simDlq.map(q => (
-                <div key={q.id} className="p-3 rounded-lg bg-slate-900/60 border border-slate-800 text-xs space-y-1">
-                  <div className="flex justify-between"><span className="font-mono text-red-400">{q.id} → {q.deliveryId}</span><span className="text-slate-500">{new Date(q.failedAt).toLocaleString()}</span></div>
-                  <div className="text-slate-300">{q.reason}</div>
-                  <div className="text-slate-600 font-mono truncate">{q.payloadPreview}</div>
-                  <div className="flex gap-2 pt-1">
-                    <button className="px-2 py-1 rounded bg-amber-500/15 border border-amber-500/30 text-amber-300 hover:bg-amber-500/25 flex items-center gap-1"><RotateCcw className="w-3 h-3" />Replay (simulated)</button>
-                    <button className="px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-400 hover:text-slate-200">Discard</button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ---------------- ANALYTICS ---------------- */}
+      {/* ANALYTICS */}
       {tab === 'analytics' && (
-        <div className="grid lg:grid-cols-2 gap-6">
-          <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-5">
-            <h3 className="text-sm font-semibold text-white mb-4 flex items-center gap-2"><Activity className="w-4 h-4 text-cyan-400" />Event volume vs alerts sent (24h)</h3>
-            <ResponsiveContainer width="100%" height={280}>
-              <AreaChart data={analytics24h.hourlyVolume}>
-                <defs>
-                  <linearGradient id="gEv" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#22d3ee" stopOpacity={0.5} /><stop offset="100%" stopColor="#22d3ee" stopOpacity={0} /></linearGradient>
-                  <linearGradient id="gAl" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#f59e0b" stopOpacity={0.5} /><stop offset="100%" stopColor="#f59e0b" stopOpacity={0} /></linearGradient>
-                </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
-                <XAxis dataKey="hour" tick={{ fill: '#64748b', fontSize: 10 }} interval={3} />
-                <YAxis tick={{ fill: '#64748b', fontSize: 10 }} />
-                <Tooltip contentStyle={{ background: '#0f172a', border: '1px solid #334155', borderRadius: 8, fontSize: 12 }} />
-                <Area type="monotone" dataKey="events" stroke="#22d3ee" fill="url(#gEv)" name="raw events" />
-                <Area type="monotone" dataKey="alerts_sent" stroke="#f59e0b" fill="url(#gAl)" name="alerts sent" />
-              </AreaChart>
-            </ResponsiveContainer>
-            <p className="text-[11px] text-slate-500 mt-2">Gap between raw events and alerts sent = deduplication, correlation & storm suppression.</p>
-          </div>
-          <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-5">
-            <h3 className="text-sm font-semibold text-white mb-4 flex items-center gap-2"><BarChart3 className="w-4 h-4 text-amber-400" />Notifications by severity</h3>
-            <ResponsiveContainer width="100%" height={280}>
-              <PieChart>
-                <Pie data={analytics24h.bySeverity} dataKey="value" nameKey="name" innerRadius={60} outerRadius={100} paddingAngle={3}>
-                  {analytics24h.bySeverity.map(s => <Cell key={s.name} fill={s.color} />)}
-                </Pie>
-                <Legend wrapperStyle={{ fontSize: 12 }} />
-                <Tooltip contentStyle={{ background: '#0f172a', border: '1px solid #334155', borderRadius: 8, fontSize: 12 }} />
-              </PieChart>
-            </ResponsiveContainer>
-          </div>
-          <div className="lg:col-span-2 bg-slate-900/60 border border-slate-800 rounded-xl p-5 grid grid-cols-2 md:grid-cols-4 gap-4">
-            {[
-              { l: 'Escalations triggered (7d)', v: ri(28, 60), s: 'severity-based routing fired' },
-              { l: 'Avg time-to-acknowledge', v: `${analytics24h.meanAckMin}m`, s: 'P1 targets: <10m' },
-              { l: 'Suppression ratio', v: `${Math.round((analytics24h.suppressed / analytics24h.totalEvents) * 100)}%`, s: 'noise removed before humans' },
-              { l: 'DLQ replay success', v: '89%', s: 'after endpoint recovery' },
-            ].map((x, i) => (
-              <div key={i} className="p-4 rounded-lg bg-slate-800/40 border border-slate-700/40">
-                <div className="text-2xl font-bold text-white">{x.v}</div>
-                <div className="text-sm text-slate-300 mt-1">{x.l}</div>
-                <div className="text-[11px] text-slate-500">{x.s}</div>
-              </div>
-            ))}
-          </div>
+        <div className="grid md:grid-cols-3 gap-4">
+          <Panel title="By Severity" icon={<BarChart3 size={16} className="text-cyan-400" />}>
+            {Object.entries(analytics.by_severity || {}).map(([k, v]) => <Row key={k} k={k} v={String(v)} />)}
+            {!Object.keys(analytics.by_severity || {}).length && <Empty />}
+          </Panel>
+          <Panel title="By Channel" icon={<Bell size={16} className="text-purple-400" />}>
+            {Object.entries(analytics.by_channel || {}).map(([k, v]) => <Row key={k} k={k} v={String(v)} />)}
+            {!Object.keys(analytics.by_channel || {}).length && <Empty />}
+          </Panel>
+          <Panel title="Pipeline Health" icon={<AlertOctagon size={16} className="text-orange-400" />}>
+            <Row k="Delivered" v={String(analytics.delivered ?? 0)} />
+            <Row k="Failed / DLQ" v={String((analytics.failed ?? 0) + (analytics.dead_letters ?? 0))} />
+            <Row k="Suppressed (storms)" v={String(analytics.suppressed ?? 0)} />
+            <Row k="Acknowledged" v={String(analytics.acked ?? 0)} />
+          </Panel>
         </div>
       )}
+
+      {editing && <RuleEditor rule={editing} tenants={tenants} isPlatform={isPlatform} onClose={() => setEditing(null)} onSave={saveRule} />}
+      {showSim && <SimulateAlertModal isPlatform={isPlatform} tenants={tenants} onClose={() => setShowSim(false)} onDone={() => load(true)} />}
     </div>
   );
-}
+};
 
-// local helper kept outside component for stable output
-function ri(min: number, max: number) { return Math.floor(((min + max) / 2 + (min - max)) % (max - min)) + min; }
+const Kpi: React.FC<{ label: string; value: number; color: string }> = ({ label, value, color }) => (
+  <div className="bg-slate-800/50 rounded-xl p-4"><p className={`text-2xl font-bold ${color}`}>{value}</p><p className="text-xs text-slate-400">{label}</p></div>
+);
+const Panel: React.FC<{ title: string; icon: React.ReactNode; children: React.ReactNode }> = ({ title, icon, children }) => (
+  <div className="bg-slate-800/50 rounded-xl p-4"><h3 className="flex items-center gap-2 text-sm font-bold text-white mb-3">{icon}{title}</h3>{children}</div>
+);
+const Row: React.FC<{ k: string; v: string }> = ({ k, v }) => (
+  <div className="flex justify-between text-sm py-1 border-b border-slate-700/40 last:border-0"><span className="text-slate-400 capitalize">{k}</span><span className="text-slate-100 font-semibold">{v}</span></div>
+);
+const Empty = () => <p className="text-xs text-slate-500">Awaiting data…</p>;
+
+export default NotificationEnginePage;

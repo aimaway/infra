@@ -1,449 +1,528 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  Inbox, Plus, Search, RefreshCw, X, ShieldAlert, Clock, AlertOctagon,
+  FileText, Lock, CheckCircle2, XCircle, Bot, GitBranch, Users, Play,
+} from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import {
-  AdvTicket, simTickets, simWorkloads, slaStateOf, SlaState,
-} from '../../data/ticketingNotifData';
-import {
-  Ticket, Brain, Timer, ShieldAlert, Lock, GitCompare, CheckCircle2, Clock,
-  Users, Search, Filter, X, Cpu, Link2, FileLock2, ScrollText, Zap, AlertOctagon,
-  TrendingUp, UserCheck, ChevronRight, Sparkles, BarChart3,
-} from 'lucide-react';
+  ticketsApi, AdvTicket, TicketEvidence, AuditEntry, Approval, TenantRef,
+  ApiError,
+} from '../../services/api';
 
-// ---- small style helpers ---------------------------------------------------
-const priBadge: Record<string, string> = {
-  p1: 'bg-red-500/20 text-red-400 border-red-500/30',
-  p2: 'bg-orange-500/20 text-orange-400 border-orange-500/30',
-  p3: 'bg-yellow-500/20 text-yellow-400 border-yellow-500/30',
-  p4: 'bg-blue-500/20 text-blue-400 border-blue-500/30',
+// ---------------------------------------------------------------------------
+// Helpers / presentational atoms (all data comes from the real backend API)
+// ---------------------------------------------------------------------------
+
+const PRIORITIES = ['p1', 'p2', 'p3', 'p4'];
+const CATEGORIES = ['incident', 'service_request', 'problem', 'change', 'vulnerability', 'other'];
+const STATUSES = ['new', 'triage', 'open', 'pending', 'escalated', 'resolved', 'closed'];
+
+const prioColor: Record<string, string> = {
+  p1: 'bg-red-500/20 text-red-400 border-red-500/40',
+  p2: 'bg-orange-500/20 text-orange-400 border-orange-500/40',
+  p3: 'bg-yellow-500/20 text-yellow-400 border-yellow-500/40',
+  p4: 'bg-sky-500/20 text-sky-400 border-sky-500/40',
 };
-const statusBadge: Record<string, string> = {
-  new: 'bg-sky-500/20 text-sky-400 border-sky-500/30',
-  triage: 'bg-cyan-500/20 text-cyan-400 border-cyan-500/30',
-  open: 'bg-blue-500/20 text-blue-400 border-blue-500/30',
-  in_progress: 'bg-yellow-500/20 text-yellow-400 border-yellow-500/30',
-  pending_vendor: 'bg-orange-500/20 text-orange-400 border-orange-500/30',
-  escalated: 'bg-red-500/20 text-red-400 border-red-500/30',
-  awaiting_approval: 'bg-purple-500/20 text-purple-400 border-purple-500/30',
-  resolved: 'bg-green-500/20 text-green-400 border-green-500/30',
-  closed: 'bg-slate-500/20 text-slate-400 border-slate-500/30',
+const statusColor: Record<string, string> = {
+  new: 'bg-slate-500/20 text-slate-300',
+  triage: 'bg-purple-500/20 text-purple-300',
+  open: 'bg-cyan-500/20 text-cyan-300',
+  pending: 'bg-amber-500/20 text-amber-300',
+  escalated: 'bg-red-500/20 text-red-300',
+  resolved: 'bg-emerald-500/20 text-emerald-300',
+  closed: 'bg-slate-600/30 text-slate-400',
 };
-const slaBadge: Record<SlaState, string> = {
-  on_track: 'text-emerald-400', at_risk: 'text-amber-400', breached: 'text-red-400', met: 'text-green-400',
+const slaColor: Record<string, string> = {
+  breached: 'text-red-400', at_risk: 'text-orange-400', on_track: 'text-emerald-400', met: 'text-emerald-400', paused: 'text-slate-400',
 };
 
-function fmtMin(m: number) {
+const fmt = (iso?: string | null) => (iso ? new Date(iso).toLocaleString() : '—');
+const ago = (iso?: string | null) => {
+  if (!iso) return '—';
+  const m = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000));
   if (m < 60) return `${m}m`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ${m % 60}m`;
-  return `${Math.floor(h / 24)}d ${h % 24}h`;
+  if (m < 1440) return `${Math.round(m / 60)}h`;
+  return `${Math.round(m / 1440)}d`;
+};
+
+const Badge: React.FC<{ className?: string; children: React.ReactNode }> = ({ className = '', children }) => (
+  <span className={`px-2 py-0.5 rounded-full text-xs font-semibold border border-transparent ${className}`}>{children}</span>
+);
+
+// ---------------------------------------------------------------------------
+// Create-ticket modal — every parameter a client or ops team needs
+// ---------------------------------------------------------------------------
+
+interface FormState {
+  title: string; description: string; priority: string; category: string;
+  org_id: string; assignee: string; tags: string; asset: string; vulnerability_ref: string;
 }
+const emptyForm: FormState = {
+  title: '', description: '', priority: 'p3', category: 'incident',
+  org_id: '', assignee: '', tags: '', asset: '', vulnerability_ref: '',
+};
 
-function timeAgo(isoStr: string) {
-  const diff = Math.max(0, Date.now() - new Date(isoStr).getTime());
-  return fmtMin(Math.floor(diff / 60000));
-}
+const CreateTicketModal: React.FC<{
+  tenants: TenantRef[]; isPlatform: boolean; onClose: () => void;
+  onCreate: (data: Parameters<typeof ticketsApi.create>[0]) => Promise<void>;
+}> = ({ tenants, isPlatform, onClose, onCreate }) => {
+  const [f, setF] = useState<FormState>(emptyForm);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  const set = (k: keyof FormState) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) =>
+    setF({ ...f, [k]: e.target.value });
 
-export default function AdvancedTicketingPage() {
-  const { user } = useAuth();
-  const isPlatformAdmin = user?.role === 'platform_admin';
-  const [tickets, setTickets] = useState<AdvTicket[]>(simTickets);
-  const [tab, setTab] = useState<'queue' | 'workload' | 'sla'>('queue');
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [search, setSearch] = useState('');
-  const [statusFilter, setStatusFilter] = useState('all');
-  const [tenantFilter, setTenantFilter] = useState('*');
-  const [tick, setTick] = useState(0); // live SLA countdown heartbeat
-  const [approving, setApproving] = useState(false);
-  const [reclassified, setReclassified] = useState<Record<string, boolean>>({});
-
-  // simulate SLA timers advancing + occasional AI reclassification events
-  useEffect(() => {
-    const iv = setInterval(() => setTick(t => t + 1), 5000);
-    return () => clearInterval(iv);
-  }, []);
-
-  const visibleTickets = useMemo(() => {
-    void tick;
-    return tickets.filter(t => {
-      if (!isPlatformAdmin && tenantFilter !== '*' && t.tenant !== tenantFilter) return false;
-      if (statusFilter !== 'all' && t.status !== statusFilter) return false;
-      if (search && !(`${t.id} ${t.title} ${t.category} ${t.asset ?? ''}`.toLowerCase().includes(search.toLowerCase()))) return false;
-      return true;
-    });
-  }, [tickets, search, statusFilter, tenantFilter, isPlatformAdmin, tick]);
-
-  const stats = useMemo(() => {
-    const active = tickets.filter(t => !['resolved', 'closed'].includes(t.status));
-    return {
-      total: tickets.length,
-      active: active.length,
-      breached: tickets.filter(t => slaStateOf(t) === 'breached').length,
-      atRisk: tickets.filter(t => slaStateOf(t) === 'at_risk').length,
-      awaitingApproval: tickets.filter(t => t.status === 'awaiting_approval').length,
-      duplicates: tickets.filter(t => t.duplicateOf).length,
-      aiAccuracy: 93.7,
-    };
-  }, [tickets]);
-
-  const selected = tickets.find(t => t.id === selectedId) || null;
-
-  const tenants = ['*', ...Array.from(new Set(simTickets.map(t => t.tenant)))];
-
-  const runAiTriage = (id: string) => {
-    setTickets(prev => prev.map(t => t.id === id ? { ...t, status: 'triage', ai: { ...t.ai, confidence: Math.min(99, t.ai.confidence + 1) } } : t));
-    setReclassified(r => ({ ...r, [id]: true }));
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (f.title.trim().length < 3) { setErr('Title must be at least 3 characters.'); return; }
+    setBusy(true); setErr('');
+    try {
+      await onCreate({
+        title: f.title.trim(),
+        description: f.description.trim() || undefined,
+        priority: f.priority,
+        category: f.category,
+        org_id: isPlatform && f.org_id ? Number(f.org_id) : undefined,
+        assignee: f.assignee.trim() || undefined,
+        tags: f.tags.split(',').map(t => t.trim()).filter(Boolean),
+        asset: f.asset.trim() || undefined,
+        vulnerability_ref: f.vulnerability_ref.trim() || undefined,
+      });
+      onClose();
+    } catch (ex: any) { setErr(ex.message || 'Failed to create ticket'); }
+    finally { setBusy(false); }
   };
 
-  const approveClosure = (id: string) => {
-    setApproving(true);
-    setTimeout(() => {
-      setTickets(prev => prev.map(t => t.id === id ? {
-        ...t,
-        status: 'closed',
-        approvals: t.approvals.map((a, i) => (i === 0 ? { ...a, status: 'approved' as const, at: new Date().toISOString(), note: 'Approved via portal (simulated).' } : a)),
-        audit: [...t.audit, { seq: t.audit.length + 1, at: new Date().toISOString(), actor: user?.name ?? 'You', action: 'approval_granted', detail: 'Evidence-based closure approved', prevHash: t.audit[t.audit.length - 1]?.hash ?? '0'.repeat(24), hash: Math.random().toString(16).slice(2, 26) }],
-      } : t));
-      setApproving(false);
-    }, 1200);
-  };
+  const inp = 'w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 focus:border-cyan-500 outline-none';
+  const lbl = 'block text-xs font-semibold text-slate-400 mb-1 uppercase tracking-wide';
 
   return (
-    <div className="p-6 space-y-6">
-      {/* Header */}
-      <div className="flex flex-wrap items-center justify-between gap-4">
+    <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4" onClick={onClose}>
+      <form onSubmit={submit} onClick={e => e.stopPropagation()}
+        className="bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto p-6 space-y-4">
+        <div className="flex items-center justify-between">
+          <h2 className="text-lg font-bold text-white flex items-center gap-2"><Plus className="text-cyan-400" size={20} /> Create Ticket</h2>
+          <button type="button" onClick={onClose} className="text-slate-400 hover:text-white"><X size={20} /></button>
+        </div>
         <div>
-          <div className="flex items-center gap-3">
-            <div className="p-2.5 rounded-xl bg-cyan-500/10 border border-cyan-500/20"><Ticket className="w-6 h-6 text-cyan-400" /></div>
-            <h1 className="text-3xl font-bold text-white">Advanced Ticketing</h1>
-            <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-purple-500/20 text-purple-300 border border-purple-500/30 flex items-center gap-1"><Sparkles className="w-3 h-3" />AI-assisted · Simulated</span>
-          </div>
-          <p className="text-slate-400 mt-1">SLA automation · evidence vault · immutable audit · multi-tenant portal</p>
+          <label className={lbl}>Title *</label>
+          <input className={inp} value={f.title} onChange={set('title')} placeholder="e.g. Ransomware signature detected on file server" autoFocus />
         </div>
-        <div className="flex items-center gap-2 text-sm">
-          <select value={tenantFilter} onChange={e => setTenantFilter(e.target.value)}
-            className={`bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-slate-300 ${!isPlatformAdmin ? '' : ''}`}>
-            {tenants.map(tn => <option key={tn} value={tn}>{tn === '*' ? (isPlatformAdmin ? 'All tenants' : 'My organization') : tn}</option>)}
-          </select>
+        <div>
+          <label className={lbl}>Description</label>
+          <textarea className={inp} rows={3} value={f.description} onChange={set('description')}
+            placeholder="Details, logs, impact… (feeds the AI classifier)" />
         </div>
-      </div>
-
-      {/* KPI cards */}
-      <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4">
-        {[
-          { label: 'Active tickets', v: stats.active, icon: Ticket, c: 'text-cyan-400' },
-          { label: 'SLA breached', v: stats.breached, icon: AlertOctagon, c: 'text-red-400' },
-          { label: 'Breach predicted', v: stats.atRisk, icon: TrendingUp, c: 'text-amber-400' },
-          { label: 'Awaiting approval', v: stats.awaitingApproval, icon: UserCheck, c: 'text-purple-400' },
-          { label: 'Duplicate clusters', v: stats.duplicates, icon: GitCompare, c: 'text-sky-400' },
-          { label: 'AI triage accuracy', v: `${stats.aiAccuracy}%`, icon: Cpu, c: 'text-emerald-400' },
-        ].map(k => (
-          <div key={k.label} className="bg-slate-900/60 border border-slate-800 rounded-xl p-4">
-            <k.icon className={`w-5 h-5 ${k.c}`} />
-            <div className="text-2xl font-bold text-white mt-2">{k.v}</div>
-            <div className="text-xs text-slate-500">{k.label}</div>
+        <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+          <div>
+            <label className={lbl}>Priority</label>
+            <select className={inp} value={f.priority} onChange={set('priority')}>
+              {PRIORITIES.map(p => <option key={p} value={p}>{p.toUpperCase()}</option>)}
+            </select>
           </div>
-        ))}
-      </div>
-
-      {/* Tabs */}
-      <div className="flex gap-2">
-        {([['queue', 'Ticket Queue', Ticket], ['sla', 'SLA & Escalations', Timer], ['workload', 'Team Workload', Users]] as const).map(([id, label, Icon]) => (
-          <button key={id} onClick={() => setTab(id)}
-            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition ${tab === id ? 'bg-cyan-500/15 text-cyan-300 border border-cyan-500/30' : 'bg-slate-900 text-slate-400 border border-slate-800 hover:text-slate-200'}`}>
-            <Icon className="w-4 h-4" />{label}
-          </button>
-        ))}
-      </div>
-
-      {tab === 'queue' && (
-        <div className="space-y-4">
-          {/* Filters */}
-          <div className="flex flex-wrap gap-3">
-            <div className="relative flex-1 min-w-[220px]">
-              <Search className="absolute left-3 top-2.5 w-4 h-4 text-slate-500" />
-              <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search tickets, assets, CVEs…"
-                className="w-full bg-slate-900 border border-slate-700 rounded-lg pl-9 pr-3 py-2 text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-cyan-500/50" />
-            </div>
-            <div className="flex items-center gap-2 text-slate-400 text-sm"><Filter className="w-4 h-4" />
-              <select value={statusFilter} onChange={e => setStatusFilter(e.target.value)} className="bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-slate-300">
-                {['all', 'new', 'triage', 'open', 'in_progress', 'pending_vendor', 'escalated', 'awaiting_approval', 'resolved', 'closed'].map(s => <option key={s} value={s}>{s.replace(/_/g, ' ')}</option>)}
+          <div>
+            <label className={lbl}>Category</label>
+            <select className={inp} value={f.category} onChange={set('category')}>
+              {CATEGORIES.map(c => <option key={c} value={c}>{c.replace('_', ' ')}</option>)}
+            </select>
+          </div>
+          {isPlatform && (
+            <div>
+              <label className={lbl}>Tenant</label>
+              <select className={inp} value={f.org_id} onChange={set('org_id')}>
+                <option value="">Select tenant…</option>
+                {tenants.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
               </select>
             </div>
+          )}
+          <div>
+            <label className={lbl}>Assignee</label>
+            <input className={inp} value={f.assignee} onChange={set('assignee')} placeholder="analyst email or name" />
           </div>
-
-          {/* Table */}
-          <div className="bg-slate-900/60 border border-slate-800 rounded-xl overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-left text-slate-500 border-b border-slate-800">
-                  <th className="px-4 py-3 font-medium">Ticket</th>
-                  {isPlatformAdmin && <th className="px-4 py-3 font-medium">Tenant</th>}
-                  <th className="px-4 py-3 font-medium">AI Classification</th>
-                  <th className="px-4 py-3 font-medium">Priority</th>
-                  <th className="px-4 py-3 font-medium">Status</th>
-                  <th className="px-4 py-3 font-medium">SLA</th>
-                  <th className="px-4 py-3 font-medium">Asset / Vuln</th>
-                  <th className="px-4 py-3 font-medium"></th>
-                </tr>
-              </thead>
-              <tbody>
-                {visibleTickets.map(t => {
-                  const sla = slaStateOf(t);
-                  const remaining = t.slaTargetMin - t.consumedMin;
-                  return (
-                    <tr key={t.id} className="border-b border-slate-800/60 hover:bg-slate-800/30 cursor-pointer" onClick={() => setSelectedId(t.id)}>
-                      <td className="px-4 py-3">
-                        <div className="font-mono text-cyan-400 text-xs">{t.id}</div>
-                        <div className="text-slate-200 max-w-[280px] truncate">{t.title}</div>
-                        {t.duplicateOf && <span className="inline-flex items-center gap-1 text-[10px] text-sky-400 mt-0.5"><GitCompare className="w-3 h-3" />dup of {t.duplicateOf}</span>}
-                      </td>
-                      {isPlatformAdmin && <td className="px-4 py-3 text-slate-300 text-xs">{t.tenant}</td>}
-                      <td className="px-4 py-3">
-                        <div className="flex items-center gap-1.5 text-xs text-slate-300"><Brain className="w-3.5 h-3.5 text-purple-400" />{t.ai.category}</div>
-                        <div className="text-[10px] text-slate-500">{reclassified[t.id] ? 're-triaged just now' : `conf ${t.ai.confidence}%`}</div>
-                      </td>
-                      <td className="px-4 py-3">
-                        <span className={`px-2 py-0.5 rounded border text-xs font-semibold uppercase ${priBadge[t.priority]}`}>{t.priority}</span>
-                        {t.priority !== t.aiPriority && <div className="text-[10px] text-purple-400 mt-1">AI suggests {t.aiPriority}</div>}
-                      </td>
-                      <td className="px-4 py-3"><span className={`px-2 py-0.5 rounded border text-xs capitalize ${statusBadge[t.status]}`}>{t.status.replace(/_/g, ' ')}</span></td>
-                      <td className="px-4 py-3">
-                        <div className={`flex items-center gap-1 text-xs font-medium ${slaBadge[sla]}`}><Timer className="w-3.5 h-3.5" />
-                          {['resolved', 'closed'].includes(t.status) ? sla : remaining > 0 ? `${fmtMin(remaining)} left` : `over by ${fmtMin(-remaining)}`}
-                        </div>
-                        <div className="text-[10px] text-slate-500">breach risk {t.breachProbability}%</div>
-                      </td>
-                      <td className="px-4 py-3 text-xs">
-                        <div className="text-slate-300 flex items-center gap-1"><Link2 className="w-3 h-3 text-slate-500" />{t.asset ?? '—'}</div>
-                        {t.vulnerability && (
-                          <div className={`flex items-center gap-1 mt-0.5 ${t.vulnerability.exploitSeen ? 'text-red-400' : 'text-amber-400'}`}>
-                            <ShieldAlert className="w-3 h-3" />{t.vulnerability.cve} · CVSS {t.vulnerability.cvss}{t.vulnerability.exploitSeen ? ' · exploited' : ''}
-                          </div>
-                        )}
-                      </td>
-                      <td className="px-4 py-3"><ChevronRight className="w-4 h-4 text-slate-600" /></td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-            {visibleTickets.length === 0 && <div className="p-8 text-center text-slate-500">No tickets match your filters.</div>}
+          <div>
+            <label className={lbl}>Asset</label>
+            <input className={inp} value={f.asset} onChange={set('asset')} placeholder="FW-EDGE-01 / 10.0.0.5" />
+          </div>
+          <div>
+            <label className={lbl}>Vulnerability ref (CVE)</label>
+            <input className={inp} value={f.vulnerability_ref} onChange={set('vulnerability_ref')} placeholder="CVE-2026-XXXXX" />
           </div>
         </div>
-      )}
-
-      {tab === 'sla' && (
-        <div className="grid lg:grid-cols-2 gap-6">
-          <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-5 space-y-4">
-            <h3 className="text-lg font-semibold text-white flex items-center gap-2"><Timer className="w-5 h-5 text-amber-400" />SLA policies & breach predictions</h3>
-            {[
-              { p: 'P1 — Critical', target: '4h response / 24h resolution', policy: 'Auto-escalate L1→L3 after 30 min unacked; SMS on-call.' },
-              { p: 'P2 — High', target: '8h response / 2d resolution', policy: 'Escalate to team lead after 4h; notify client admin.' },
-              { p: 'P3 — Medium', target: '1d response / 5d resolution', policy: 'Digest notification; escalate after 3d idle.' },
-              { p: 'P4 — Low', target: '3d response / 10d resolution', policy: 'Weekly digest; no auto-escalation.' },
-            ].map(s => (
-              <div key={s.p} className="p-3 rounded-lg bg-slate-800/40 border border-slate-700/50">
-                <div className="flex justify-between text-sm"><span className="text-slate-200 font-medium">{s.p}</span><span className="text-cyan-400">{s.target}</span></div>
-                <p className="text-xs text-slate-500 mt-1">{s.policy}</p>
-              </div>
-            ))}
-            <p className="text-[11px] text-slate-500 italic">Breach prediction model: time-to-SLA × assignee workload × category history (simulated).</p>
-          </div>
-          <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-5">
-            <h3 className="text-lg font-semibold text-white flex items-center gap-2 mb-4"><AlertOctagon className="w-5 h-5 text-red-400" />At-risk & breached (live)</h3>
-            <div className="space-y-3 max-h-[420px] overflow-y-auto pr-1">
-              {tickets.filter(t => ['at_risk', 'breached'].includes(slaStateOf(t))).sort((a, b) => b.breachProbability - a.breachProbability).map(t => (
-                <div key={t.id} className="p-3 rounded-lg bg-slate-800/40 border border-slate-700/50 flex items-center justify-between gap-3">
-                  <div className="min-w-0">
-                    <div className="text-sm text-slate-200 truncate">{t.title}</div>
-                    <div className="text-xs text-slate-500 font-mono">{t.id} · {t.tenant} · lvl {t.escalationLevel}</div>
-                  </div>
-                  <div className="text-right flex-shrink-0">
-                    <div className={`text-sm font-bold ${slaStateOf(t) === 'breached' ? 'text-red-400' : 'text-amber-400'}`}>{t.breachProbability}%</div>
-                    <div className="text-[10px] text-slate-500">breach risk</div>
-                  </div>
-                  <button onClick={() => { setSelectedId(t.id); setTab('queue'); }} className="text-cyan-400 hover:text-cyan-300 text-xs flex-shrink-0">Open →</button>
-                </div>
-              ))}
-            </div>
-          </div>
+        <div>
+          <label className={lbl}>Tags (comma separated)</label>
+          <input className={inp} value={f.tags} onChange={set('tags')} placeholder="firewall, compliance, lateral-movement" />
         </div>
-      )}
-
-      {tab === 'workload' && (
-        <div className="bg-slate-900/60 border border-slate-800 rounded-xl overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead><tr className="text-left text-slate-500 border-b border-slate-800">
-              <th className="px-4 py-3">Agent</th><th className="px-4 py-3">Grade</th><th className="px-4 py-3">Presence</th>
-              <th className="px-4 py-3">Open</th><th className="px-4 py-3">P1/P2</th><th className="px-4 py-3">Capacity</th>
-              <th className="px-4 py-3">Avg resolve</th><th className="px-4 py-3">Breaches 30d</th>
-            </tr></thead>
-            <tbody>
-              {simWorkloads.map(w => (
-                <tr key={w.agent} className="border-b border-slate-800/60">
-                  <td className="px-4 py-3 text-slate-200">{w.agent}</td>
-                  <td className="px-4 py-3"><span className="px-2 py-0.5 rounded text-xs bg-slate-800 text-slate-300">{w.grade}</span></td>
-                  <td className="px-4 py-3"><span className={`inline-block w-2 h-2 rounded-full mr-1 ${w.online ? 'bg-emerald-400' : 'bg-slate-600'}`}>{w.online ? 'online' : 'offline'}</span></td>
-                  <td className="px-4 py-3 text-slate-300">{w.open}</td>
-                  <td className="px-4 py-3 text-slate-300">{w.p1p2}</td>
-                  <td className="px-4 py-3">
-                    <div className="flex items-center gap-2">
-                      <div className="w-24 h-2 rounded bg-slate-800 overflow-hidden"><div className={`h-full ${w.capacityPct > 100 ? 'bg-red-500' : w.capacityPct > 80 ? 'bg-amber-500' : 'bg-emerald-500'}`} style={{ width: `${Math.min(100, w.capacityPct)}%` }} /></div>
-                      <span className={`text-xs ${w.capacityPct > 100 ? 'text-red-400' : 'text-slate-400'}`}>{w.capacityPct}%</span>
-                    </div>
-                  </td>
-                  <td className="px-4 py-3 text-slate-300">{w.avgResolveH}h</td>
-                  <td className={`px-4 py-3 ${w.slaBreaches30d > 3 ? 'text-red-400' : 'text-slate-300'}`}>{w.slaBreaches30d}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          <div className="p-4 text-xs text-slate-500 flex items-center gap-2"><Zap className="w-3.5 h-3.5 text-amber-400" />Smart-assignment would rebalance overloaded agents (&gt;100%) toward peers with spare capacity — simulated in this demo.</div>
+        {err && <p className="text-red-400 text-sm">{err}</p>}
+        <div className="flex justify-end gap-3 pt-2">
+          <button type="button" onClick={onClose} className="px-4 py-2 rounded-lg text-sm text-slate-300 bg-slate-800 hover:bg-slate-700">Cancel</button>
+          <button type="submit" disabled={busy} className="px-4 py-2 rounded-lg text-sm font-semibold bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-white">
+            {busy ? 'Creating…' : 'Create Ticket'}
+          </button>
         </div>
-      )}
-
-      {/* ------------------ Detail drawer ------------------ */}
-      {selected && (
-        <div className="fixed inset-0 z-50 flex justify-end bg-black/60" onClick={() => setSelectedId(null)}>
-          <div className="w-full max-w-2xl h-full overflow-y-auto bg-slate-950 border-l border-cyan-500/20 p-6 space-y-6" onClick={e => e.stopPropagation()}>
-            <div className="flex items-start justify-between">
-              <div>
-                <div className="font-mono text-cyan-400 text-sm">{selected.id} · <span className="text-slate-400">{selected.tenant}</span></div>
-                <h2 className="text-xl font-bold text-white mt-1">{selected.title}</h2>
-                <div className="flex gap-2 mt-2 flex-wrap">
-                  <span className={`px-2 py-0.5 rounded border text-xs uppercase font-semibold ${priBadge[selected.priority]}`}>{selected.priority}</span>
-                  <span className={`px-2 py-0.5 rounded border text-xs capitalize ${statusBadge[selected.status]}`}>{selected.status.replace(/_/g, ' ')}</span>
-                  <span className="px-2 py-0.5 rounded border text-xs border-slate-700 text-slate-400">opened {timeAgo(selected.createdAt)} ago</span>
-                </div>
-              </div>
-              <button onClick={() => setSelectedId(null)} className="p-2 rounded-lg hover:bg-slate-800 text-slate-400"><X className="w-5 h-5" /></button>
-            </div>
-
-            {/* AI panel */}
-            <div className="rounded-xl border border-purple-500/30 bg-purple-500/5 p-4 space-y-3">
-              <div className="flex items-center justify-between">
-                <h3 className="font-semibold text-purple-300 flex items-center gap-2"><Brain className="w-4 h-4" />AI classification & prioritization</h3>
-                <span className="text-[10px] text-slate-500">{selected.ai.modelVersion}</span>
-              </div>
-              <div className="grid grid-cols-3 gap-3 text-sm">
-                <div><div className="text-slate-500 text-xs">Category</div><div className="text-slate-200">{selected.ai.category}</div></div>
-                <div><div className="text-slate-500 text-xs">MITRE tactic</div><div className="text-slate-200">{selected.ai.subcategory}</div></div>
-                <div><div className="text-slate-500 text-xs">Confidence</div>
-                  <div className="flex items-center gap-2"><div className="w-16 h-1.5 rounded bg-slate-800"><div className="h-full rounded bg-purple-500" style={{ width: `${selected.ai.confidence}%` }} /></div><span className="text-purple-300 text-xs">{selected.ai.confidence}%</span></div>
-                </div>
-              </div>
-              <ul className="space-y-1.5">
-                {selected.ai.reasoning.map((r, i) => <li key={i} className="text-xs text-slate-400 flex gap-2"><Sparkles className="w-3 h-3 text-purple-400 flex-shrink-0 mt-0.5" />{r}</li>)}
-              </ul>
-              {selected.duplicateOf && (
-                <div className="text-xs text-sky-300 bg-sky-500/10 border border-sky-500/20 rounded-lg p-2 flex items-center gap-2"><GitCompare className="w-4 h-4" />Correlated duplicate incident → <button className="underline" onClick={() => setSelectedId(selected.duplicateOf!)}>{selected.duplicateOf}</button></div>
-              )}
-              <button onClick={() => runAiTriage(selected.id)} className="w-full py-2 rounded-lg bg-purple-500/20 hover:bg-purple-500/30 border border-purple-500/30 text-purple-300 text-sm font-medium flex items-center justify-center gap-2"><Cpu className="w-4 h-4" />Re-run AI triage (simulated)</button>
-            </div>
-
-            {/* SLA + escalation */}
-            <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
-              <h3 className="font-semibold text-white flex items-center gap-2 mb-3"><Timer className="w-4 h-4 text-amber-400" />SLA timer & escalation trail</h3>
-              <div className="flex items-center gap-4 text-sm mb-3">
-                <span className={slaBadge[slaStateOf(selected)]}>{slaStateOf(selected).replace(/_/g, ' ')}</span>
-                <span className="text-slate-400">{fmtMin(selected.consumedMin)} / {fmtMin(selected.slaTargetMin)}</span>
-                <span className="text-slate-500 text-xs ml-auto">escalation level {selected.escalationLevel}/3</span>
-              </div>
-              <div className="w-full h-2 rounded bg-slate-800 overflow-hidden mb-3">
-                <div className={`h-full transition-all duration-1000 ${slaStateOf(selected) === 'breached' ? 'bg-red-500' : slaStateOf(selected) === 'at_risk' ? 'bg-amber-500' : 'bg-emerald-500'}`}
-                  style={{ width: `${Math.min(100, (selected.consumedMin / selected.slaTargetMin) * 100)}%` }} />
-              </div>
-              <div className="text-xs text-slate-500">Predicted breach probability: <span className={selected.breachProbability > 70 ? 'text-red-400' : 'text-amber-400'}>{selected.breachProbability}%</span> · next policy step: {selected.escalationLevel < 3 ? `auto-escalate to L${selected.escalationLevel + 2} on timeout` : 'director notification'}</div>
-            </div>
-
-            {/* Asset & vulnerability */}
-            <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4 grid grid-cols-2 gap-4 text-sm">
-              <div>
-                <h3 className="font-semibold text-white flex items-center gap-2 mb-2"><Link2 className="w-4 h-4 text-cyan-400" />Linked asset</h3>
-                <div className="text-slate-300 font-mono">{selected.asset ?? 'none'}</div>
-                {selected.relatedIncident && <div className="text-xs text-slate-500 mt-1">Related incident: <span className="text-cyan-400">{selected.relatedIncident}</span></div>}
-              </div>
-              <div>
-                <h3 className="font-semibold text-white flex items-center gap-2 mb-2"><ShieldAlert className="w-4 h-4 text-red-400" />Vulnerability tracking</h3>
-                {selected.vulnerability ? (
-                  <div className="text-slate-300">
-                    <span className="font-mono">{selected.vulnerability.cve}</span> · CVSS {selected.vulnerability.cvss}
-                    {selected.vulnerability.exploitSeen && <span className="ml-2 px-1.5 py-0.5 rounded bg-red-500/20 text-red-400 text-xs">exploit observed</span>}
-                  </div>
-                ) : <div className="text-slate-500 text-xs">No linked vulnerabilities (CMDB sync — simulated)</div>}
-              </div>
-            </div>
-
-            {/* Evidence vault */}
-            <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
-              <h3 className="font-semibold text-white flex items-center gap-2 mb-3"><FileLock2 className="w-4 h-4 text-emerald-400" />Evidence vault <span className="text-[10px] font-normal text-emerald-400 border border-emerald-500/30 rounded px-1.5 py-0.5">write-once</span></h3>
-              <div className="space-y-2">
-                {selected.evidence.map(ev => (
-                  <div key={ev.id} className="flex items-center justify-between p-2.5 rounded-lg bg-slate-800/40 border border-slate-700/40 text-sm">
-                    <div className="min-w-0">
-                      <div className="text-slate-200 truncate flex items-center gap-2"><Lock className="w-3.5 h-3.5 text-emerald-400 flex-shrink-0" />{ev.name}<span className="text-[10px] uppercase text-slate-500 border border-slate-700 rounded px-1">{ev.kind}</span></div>
-                      <div className="text-[10px] font-mono text-slate-500 truncate">{ev.hash}</div>
-                    </div>
-                    <div className="text-right flex-shrink-0 ml-3">
-                      <div className="text-xs text-slate-400">{(ev.sizeKb / 1024).toFixed(1)} MB</div>
-                      <div className="text-[10px] text-slate-600">by {ev.collectedBy}</div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-              <p className="text-[11px] text-slate-500 mt-2">Hashes are fingerprinted at collection; any modification breaks chain verification (simulated WORM storage).</p>
-            </div>
-
-            {/* RCA */}
-            <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
-              <h3 className="font-semibold text-white flex items-center gap-2 mb-2"><BarChart3 className="w-4 h-4 text-cyan-400" />Root-cause analysis</h3>
-              {selected.rootCause
-                ? <p className="text-sm text-slate-300">{selected.rootCause}</p>
-                : <p className="text-sm text-slate-500 italic">AI will propose an RCA once correlated telemetry converges — predicted hypothesis: <span className="text-purple-300 not-italic">“{selected.ai.predictedRootCause}”</span></p>}
-            </div>
-
-            {/* Approvals */}
-            {(selected.approvals.length > 0 || selected.status === 'resolved') && (
-              <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
-                <h3 className="font-semibold text-white flex items-center gap-2 mb-3"><UserCheck className="w-4 h-4 text-purple-400" />Approval workflow (evidence-based closure)</h3>
-                <div className="space-y-2">
-                  {selected.approvals.map(a => (
-                    <div key={a.id} className="flex items-center justify-between text-sm p-2 rounded bg-slate-800/40">
-                      <div><span className="text-slate-200">{a.name}</span> <span className="text-slate-500 text-xs">· {a.role}</span></div>
-                      <span className={`text-xs flex items-center gap-1 ${a.status === 'approved' ? 'text-emerald-400' : a.status === 'rejected' ? 'text-red-400' : 'text-amber-400'}`}>
-                        {a.status === 'approved' ? <CheckCircle2 className="w-3.5 h-3.5" /> : <Clock className="w-3.5 h-3.5" />}{a.status}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-                {selected.status === 'awaiting_approval' && (
-                  <button onClick={() => approveClosure(selected.id)} disabled={approving}
-                    className="mt-3 w-full py-2 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/30 text-emerald-300 text-sm font-medium disabled:opacity-50">
-                    {approving ? 'Verifying evidence chain…' : 'Approve closure (simulated)'}
-                  </button>
-                )}
-              </div>
-            )}
-
-            {/* Audit history */}
-            <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
-              <h3 className="font-semibold text-white flex items-center gap-2 mb-3"><ScrollText className="w-4 h-4 text-slate-400" />Immutable-style audit history <span className="text-[10px] font-normal text-slate-500">(hash-chained)</span></h3>
-              <div className="space-y-1.5 max-h-64 overflow-y-auto pr-1">
-                {selected.audit.map(a => (
-                  <div key={a.seq} className="text-xs flex items-start gap-3 p-2 rounded bg-slate-800/30">
-                    <span className="text-slate-600 font-mono w-6 flex-shrink-0">#{a.seq}</span>
-                    <div className="min-w-0 flex-1">
-                      <span className="text-slate-200">{a.actor}</span> <span className="text-cyan-400">{a.action.replace(/_/g, ' ')}</span>
-                      <div className="text-slate-600 font-mono truncate">prev:{a.prevHash.slice(0, 10)}… → {a.hash.slice(0, 10)}…</div>
-                    </div>
-                    <span className="text-slate-600 flex-shrink-0">{new Date(a.at).toLocaleString()}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
+        <p className="text-[11px] text-slate-500">On submit the backend runs AI-assisted classification, duplicate correlation and starts SLA timers automatically.</p>
+      </form>
     </div>
   );
-}
+};
+
+// ---------------------------------------------------------------------------
+// Detail drawer: AI triage · SLA · audit chain · evidence vault · approvals
+// ---------------------------------------------------------------------------
+
+const DetailDrawer: React.FC<{
+  ticket: AdvTicket; onClose: () => void; onChanged: () => void;
+}> = ({ ticket, onClose, onChanged }) => {
+  const { user } = useAuth();
+  const [tab, setTab] = useState<'overview' | 'audit' | 'evidence' | 'approvals'>('overview');
+  const [evidence, setEvidence] = useState<TicketEvidence[]>([]);
+  const [audit, setAudit] = useState<AuditEntry[]>([]);
+  const [approvals, setApprovals] = useState<Approval[]>([]);
+  const [evName, setEvName] = useState(''); const [evKind, setEvKind] = useState('log'); const [evContent, setEvContent] = useState('');
+  const [closureNote, setClosureNote] = useState('');
+  const [err, setErr] = useState('');
+
+  const load = useCallback(async () => {
+    try {
+      const [e, a, aps] = await Promise.all([
+        ticketsApi.evidence(ticket.uid),
+        ticketsApi.audit(ticket.uid),
+        ticketsApi.approvals(ticket.uid),
+      ]);
+      setEvidence(e); setAudit(a); setApprovals(aps);
+    } catch (ex: any) { setErr(ex.message); }
+  }, [ticket.uid]);
+  useEffect(() => { load(); }, [load]);
+
+  const act = async (fn: () => Promise<unknown>) => {
+    setErr('');
+    try { await fn(); await load(); onChanged(); }
+    catch (ex: any) { setErr(ex.message); }
+  };
+
+  const patch = (data: Record<string, any>) => () => act(() => ticketsApi.update(ticket.uid, data));
+
+  const tabs = ['overview', 'audit', 'evidence', 'approvals'] as const;
+  return (
+    <div className="fixed inset-0 z-40 bg-black/60" onClick={onClose}>
+      <aside onClick={e => e.stopPropagation()}
+        className="absolute right-0 top-0 h-full w-full max-w-xl bg-slate-900 border-l border-slate-700 overflow-y-auto p-6 space-y-4">
+        <div className="flex items-start justify-between">
+          <div>
+            <p className="text-xs text-slate-500 font-mono">{ticket.uid} · source: {ticket.source}{ticket.alert_id ? ` · alert #${ticket.alert_id}` : ''}</p>
+            <h2 className="text-lg font-bold text-white leading-tight">{ticket.title}</h2>
+            <div className="flex gap-2 mt-2 flex-wrap">
+              <Badge className={prioColor[ticket.priority]}>{ticket.priority.toUpperCase()}</Badge>
+              <Badge className={statusColor[ticket.status]}>{ticket.status}</Badge>
+              {ticket.tags.map(t => <Badge key={t} className="bg-slate-700/50 text-slate-300">{t}</Badge>)}
+            </div>
+          </div>
+          <button onClick={onClose} className="text-slate-400 hover:text-white"><X /></button>
+        </div>
+        {err && <p className="text-red-400 text-sm">{err}</p>}
+
+        <div className="flex gap-1 border-b border-slate-700">
+          {tabs.map(t => (
+            <button key={t} onClick={() => setTab(t)}
+              className={`px-3 py-2 text-sm capitalize ${tab === t ? 'text-cyan-400 border-b-2 border-cyan-400' : 'text-slate-400 hover:text-white'}`}>{t}</button>
+          ))}
+        </div>
+
+        {tab === 'overview' && (
+          <div className="space-y-4">
+            {ticket.description && <p className="text-sm text-slate-300 whitespace-pre-wrap">{ticket.description}</p>}
+            <div className="grid grid-cols-2 gap-3 text-sm">
+              <Info label="Asset" value={ticket.asset || '—'} />
+              <Info label="CVE" value={ticket.vulnerability_ref || '—'} />
+              <Info label="Assignee" value={ticket.assignee || 'Unassigned'} />
+              <Info label="Reporter" value={ticket.reporter || '—'} />
+              <Info label="Escalation level" value={String(ticket.escalation_level)} />
+              <Info label="Created" value={`${ago(ticket.created_at)} ago`} />
+            </div>
+
+            <Section icon={<Bot size={16} className="text-purple-400" />} title="AI-Assisted Triage">
+              {ticket.ai_category ? (
+                <div className="text-sm space-y-1">
+                  <p className="text-slate-300">Suggested: <b className="text-purple-300">{ticket.ai_category}</b> · priority <b className="text-purple-300">{(ticket.ai_priority || '').toUpperCase()}</b> · confidence <b>{Math.round((ticket.ai_confidence || 0) * 100)}%</b></p>
+                  {ticket.duplicate_of && <p className="text-amber-400">⚠ Possible duplicate of {ticket.duplicate_of}</p>}
+                  {ticket.ai_predicted_root_cause && <p className="text-slate-400">Predicted root cause: {ticket.ai_predicted_root_cause}</p>}
+                  <ul className="list-disc list-inside text-xs text-slate-400">{ticket.ai_reasoning.map((r, i) => <li key={i}>{r}</li>)}</ul>
+                </div>
+              ) : <p className="text-sm text-slate-500">No classification yet.</p>}
+            </Section>
+
+            <Section icon={<Clock size={16} className="text-cyan-400" />} title="SLA & Breach Prediction">
+              <div className="text-sm space-y-1">
+                <p>Response due: <b>{fmt(ticket.due_response_at)}</b> {ticket.first_response_at ? <span className="text-emerald-400">✓ met</span> : <span className={slaColor[ticket.sla_state || '']}>{ticket.sla_state}</span>}</p>
+                <p>Resolution due: <b>{fmt(ticket.due_resolve_at)}</b></p>
+                {ticket.breach_prediction && (
+                  <p className={`font-semibold ${ticket.breach_prediction.risk === 'high' ? 'text-red-400' : ticket.breach_prediction.risk === 'medium' ? 'text-orange-400' : 'text-emerald-400'}`}>
+                    Breach risk: {ticket.breach_prediction.risk?.toUpperCase()} — {ticket.breach_prediction.reason}
+                  </p>
+                )}
+              </div>
+              <div className="flex flex-wrap gap-2 mt-3">
+                {STATUSES.filter(s => s !== ticket.status).map(s => (
+                  <button key={s} onClick={patch({ status: s })}
+                    className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-xs text-slate-300 capitalize">→ {s}</button>
+                ))}
+              </div>
+            </Section>
+          </div>
+        )}
+
+        {tab === 'audit' && (
+          <div className="space-y-2">
+            <p className="text-xs text-slate-500 flex items-center gap-1"><Lock size={12} /> Hash-chained immutable audit trail — each entry links to the previous hash.</p>
+            {[...audit].reverse().map(a => (
+              <div key={a.seq} className="bg-slate-800/60 rounded-lg p-3 text-sm">
+                <div className="flex justify-between text-xs text-slate-500"><span>#{a.seq} · {a.actor}</span><span>{fmt(a.created_at)}</span></div>
+                <p className="text-slate-200 font-medium">{a.action}</p>
+                {a.detail && <p className="text-slate-400 text-xs">{a.detail}</p>}
+                <p className="text-[10px] font-mono text-slate-600 truncate">prev {a.prev_hash.slice(0, 12)}… → {a.entry_hash.slice(0, 12)}…</p>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {tab === 'evidence' && (
+          <div className="space-y-3">
+            <p className="text-xs text-slate-500 flex items-center gap-1"><FileText size={12} /> Evidence vault — content-addressed (SHA-256), append-only.</p>
+            {evidence.map(e => (
+              <div key={e.id} className="bg-slate-800/60 rounded-lg p-3 text-sm flex items-center justify-between">
+                <div>
+                  <p className="text-slate-200">{e.name} <Badge className="bg-slate-700 text-slate-300 ml-1">{e.kind}</Badge></p>
+                  <p className="text-[10px] font-mono text-slate-500">sha256:{e.sha256.slice(0, 24)}… · {e.size_kb} KB · {e.collected_by}</p>
+                </div>
+                {e.immutable && <Lock size={14} className="text-emerald-400" />}
+              </div>
+            ))}
+            <div className="bg-slate-800/40 rounded-lg p-3 space-y-2">
+              <div className="flex gap-2">
+                <input className="flex-1 bg-slate-800 border border-slate-700 rounded px-2 py-1 text-sm text-slate-200" placeholder="Evidence name" value={evName} onChange={e => setEvName(e.target.value)} />
+                <select className="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-sm text-slate-200" value={evKind} onChange={e => setEvKind(e.target.value)}>
+                  {['log', 'screenshot', 'pcap', 'config', 'report', 'note'].map(k => <option key={k}>{k}</option>)}
+                </select>
+              </div>
+              <textarea className="w-full bg-slate-800 border border-slate-700 rounded px-2 py-1 text-sm text-slate-200" rows={2} placeholder="Paste evidence content…" value={evContent} onChange={e => setEvContent(e.target.value)} />
+              <button onClick={() => act(async () => { await ticketsApi.addEvidence(ticket.uid, { name: evName || 'evidence', kind: evKind, content: evContent }); setEvName(''); setEvContent(''); })}
+                className="px-3 py-1.5 rounded bg-cyan-600 hover:bg-cyan-500 text-white text-sm font-semibold">Add to vault</button>
+            </div>
+          </div>
+        )}
+
+        {tab === 'approvals' && (
+          <div className="space-y-3">
+            <p className="text-xs text-slate-500">Evidence-based closure workflow: request closure → approval steps decided by role.</p>
+            {!['resolved', 'closed'].includes(ticket.status) && (
+              <div className="bg-slate-800/40 rounded-lg p-3 space-y-2">
+                <textarea className="w-full bg-slate-800 border border-slate-700 rounded px-2 py-1 text-sm text-slate-200" rows={2} placeholder="Closure justification (root cause, fix, evidence refs)…" value={closureNote} onChange={e => setClosureNote(e.target.value)} />
+                <button onClick={() => act(() => ticketsApi.closureRequest(ticket.uid, closureNote))}
+                  className="px-3 py-1.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold">Request Closure</button>
+              </div>
+            )}
+            {approvals.map(ap => (
+              <div key={ap.id} className="bg-slate-800/60 rounded-lg p-3 text-sm">
+                <div className="flex justify-between items-center">
+                  <p className="text-slate-200">Step {ap.step}: <b>{ap.approver_role}</b></p>
+                  <Badge className={ap.status === 'approved' ? 'bg-emerald-500/20 text-emerald-300' : ap.status === 'rejected' ? 'bg-red-500/20 text-red-300' : 'bg-amber-500/20 text-amber-300'}>{ap.status}</Badge>
+                </div>
+                {ap.note && <p className="text-xs text-slate-400 mt-1">{ap.note}</p>}
+                {ap.decided_by && <p className="text-[11px] text-slate-500">by {ap.decided_by} · {fmt(ap.decided_at)}</p>}
+                {ap.status === 'pending' && (user?.role === 'client_admin' || user?.role === 'platform_admin') && (
+                  <div className="flex gap-2 mt-2">
+                    <button onClick={() => act(() => ticketsApi.decide(ticket.uid, ap.id, true, 'Verified evidence attached.'))}
+                      className="flex items-center gap-1 px-2 py-1 rounded bg-emerald-600 text-white text-xs"><CheckCircle2 size={13} /> Approve</button>
+                    <button onClick={() => act(() => ticketsApi.decide(ticket.uid, ap.id, false, 'Insufficient evidence.'))}
+                      className="flex items-center gap-1 px-2 py-1 rounded bg-red-600 text-white text-xs"><XCircle size={13} /> Reject</button>
+                  </div>
+                )}
+              </div>
+            ))}
+            {approvals.length === 0 && <p className="text-sm text-slate-500">No approval workflow started.</p>}
+          </div>
+        )}
+      </aside>
+    </div>
+  );
+};
+
+const Info: React.FC<{ label: string; value: string }> = ({ label, value }) => (
+  <div><p className="text-[11px] uppercase text-slate-500 tracking-wide">{label}</p><p className="text-slate-200">{value}</p></div>
+);
+const Section: React.FC<{ icon: React.ReactNode; title: string; children: React.ReactNode }> = ({ icon, title, children }) => (
+  <div className="bg-slate-800/40 rounded-lg p-4">
+    <h3 className="flex items-center gap-2 text-sm font-bold text-white mb-2">{icon}{title}</h3>
+    {children}
+  </div>
+);
+
+// ---------------------------------------------------------------------------
+// Main page
+// ---------------------------------------------------------------------------
+
+const AdvancedTicketingPage: React.FC = () => {
+  const { user } = useAuth();
+  const isPlatform = user?.role === 'platform_admin';
+  const [tickets, setTickets] = useState<AdvTicket[]>([]);
+  const [tenants, setTenants] = useState<TenantRef[]>([]);
+  const [workload, setWorkload] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [q, setQ] = useState('');
+  const [fStatus, setFStatus] = useState('');
+  const [fPrio, setFPrio] = useState('');
+  const [fOrg, setFOrg] = useState<number | ''>('');   // tenant filter → sent as ?org_id= to the API
+  const [selected, setSelected] = useState<AdvTicket | null>(null);
+  const [showCreate, setShowCreate] = useState(false);
+  const [showWorkload, setShowWorkload] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true); setError('');
+    try {
+      const list = await ticketsApi.list({
+        q: q || undefined, status: fStatus || undefined, priority: fPrio || undefined,
+        org_id: isPlatform && fOrg !== '' ? Number(fOrg) : undefined,
+      });
+      setTickets(list);
+      if (isPlatform) {
+        const [tn, wl] = await Promise.all([ticketsApi.tenants(), ticketsApi.workload().catch(() => [])]);
+        setTenants(tn); setWorkload(wl);
+      }
+    } catch (ex: any) {
+      setError(ex instanceof ApiError ? ex.message : 'Backend unreachable — is the API container running?');
+    } finally { setLoading(false); }
+  }, [q, fStatus, fPrio, fOrg, isPlatform]);
+
+  useEffect(() => { const t = setTimeout(load, 300); return () => clearTimeout(t); }, [load]);
+
+  const stats = useMemo(() => ({
+    open: tickets.filter(t => !['resolved', 'closed'].includes(t.status)).length,
+    breached: tickets.filter(t => t.sla_state === 'breached').length,
+    atRisk: tickets.filter(t => t.sla_state === 'at_risk').length,
+    auto: tickets.filter(t => t.source === 'alert_engine').length,
+  }), [tickets]);
+
+  const selCls = 'bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none';
+
+  return (
+    <div className="p-6 space-y-5">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-bold text-white flex items-center gap-2"><Inbox className="text-cyan-400" /> Advanced Ticketing</h1>
+          <p className="text-sm text-slate-400">Live data from the ticketing service — AI triage, SLA engines, evidence vault and approval workflows.</p>
+        </div>
+        <div className="flex gap-2">
+          {isPlatform && (
+            <button onClick={() => setShowWorkload(v => !v)} className="flex items-center gap-2 px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-sm"><Users size={16} /> Team Workload</button>
+          )}
+          <button onClick={load} className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300"><RefreshCw size={16} className={loading ? 'animate-spin' : ''} /></button>
+          <button onClick={() => setShowCreate(true)} className="flex items-center gap-2 px-4 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-sm font-semibold"><Plus size={16} /> Create Ticket</button>
+        </div>
+      </div>
+
+      {/* KPI row */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <Kpi label="Active Tickets" value={stats.open} color="text-cyan-400" icon={<Inbox size={18} />} />
+        <Kpi label="SLA Breached" value={stats.breached} color="text-red-400" icon={<AlertOctagon size={18} />} />
+        <Kpi label="At Risk (predicted)" value={stats.atRisk} color="text-orange-400" icon={<Clock size={18} />} />
+        <Kpi label="Auto-created from Alerts" value={stats.auto} color="text-purple-400" icon={<GitBranch size={18} />} />
+      </div>
+
+      {showWorkload && isPlatform && (
+        <div className="bg-slate-800/50 rounded-xl p-4">
+          <h3 className="text-sm font-bold text-white mb-3">Multi-tenant Team Workload</h3>
+          {workload.length === 0 ? <p className="text-sm text-slate-500">No open tickets across tenants.</p> : (
+            <div className="grid md:grid-cols-3 gap-3">
+              {workload.map(w => (
+                <div key={w.org_id ?? w.assignee} className="bg-slate-900 rounded-lg p-3 text-sm">
+                  <p className="text-slate-200 font-semibold">{w.tenant || w.assignee || 'Unassigned'}</p>
+                  <p className="text-xs text-slate-400">open: {w.open} · breached: <span className={w.breached > 0 ? 'text-red-400' : ''}>{w.breached}</span> · p1/p2: {w.p1_p2}</p>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Filters — all applied server-side */}
+      <div className="flex flex-wrap gap-3">
+        <div className="relative flex-1 min-w-52">
+          <Search size={16} className="absolute left-3 top-2.5 text-slate-500" />
+          <input value={q} onChange={e => setQ(e.target.value)} placeholder="Search title / description / asset / CVE…"
+            className="w-full bg-slate-800 border border-slate-700 rounded-lg pl-9 pr-3 py-2 text-sm text-slate-200 outline-none focus:border-cyan-500" />
+        </div>
+        <select className={selCls} value={fStatus} onChange={e => setFStatus(e.target.value)}>
+          <option value="">All statuses</option>{STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
+        </select>
+        <select className={selCls} value={fPrio} onChange={e => setFPrio(e.target.value)}>
+          <option value="">All priorities</option>{PRIORITIES.map(p => <option key={p} value={p}>{p.toUpperCase()}</option>)}
+        </select>
+        {isPlatform && (
+          <select className={selCls} value={fOrg} onChange={e => setFOrg(e.target.value === '' ? '' : Number(e.target.value))}>
+            <option value="">All tenants</option>
+            {tenants.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+          </select>
+        )}
+      </div>
+
+      {error && <div className="bg-red-500/10 border border-red-500/40 rounded-lg p-3 text-sm text-red-300 flex items-center gap-2"><ShieldAlert size={16} />{error}</div>}
+
+      {/* Ticket table */}
+      <div className="bg-slate-800/40 rounded-xl overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead><tr className="text-left text-xs uppercase text-slate-500 border-b border-slate-700">
+            <th className="px-4 py-3">UID</th><th className="px-4 py-3">Title</th>{isPlatform && <th className="px-4 py-3">Tenant</th>}
+            <th className="px-4 py-3">Priority</th><th className="px-4 py-3">Status</th><th className="px-4 py-3">SLA</th>
+            <th className="px-4 py-3">Assignee</th><th className="px-4 py-3">Age</th>
+          </tr></thead>
+          <tbody>
+            {loading && tickets.length === 0 && <tr><td colSpan={8} className="px-4 py-8 text-center text-slate-500">Loading from backend…</td></tr>}
+            {!loading && tickets.length === 0 && (
+              <tr><td colSpan={8} className="px-4 py-10 text-center">
+                <p className="text-slate-400 mb-2">No tickets yet — the backend is live and waiting for real data.</p>
+                <p className="text-xs text-slate-500 mb-4">Every alert ingested through <code className="text-cyan-400">POST /api/alerts</code> that matches an automation rule creates a ticket here instantly. You can also create one manually.</p>
+                <button onClick={() => setShowCreate(true)} className="px-4 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-sm font-semibold inline-flex items-center gap-2"><Play size={14} /> Create your first ticket</button>
+              </td></tr>
+            )}
+            {tickets.map(t => (
+              <tr key={t.uid} onClick={() => setSelected(t)}
+                className="border-b border-slate-700/50 hover:bg-slate-700/30 cursor-pointer">
+                <td className="px-4 py-3 font-mono text-xs text-slate-400">{t.uid}</td>
+                <td className="px-4 py-3 text-slate-200">
+                  {t.title}
+                  {t.source === 'alert_engine' && <Badge className="ml-2 bg-purple-500/20 text-purple-300 border-purple-500/30">auto ← alert</Badge>}
+                  {t.duplicate_of && <Badge className="ml-2 bg-amber-500/20 text-amber-300">dup?</Badge>}
+                </td>
+                {isPlatform && <td className="px-4 py-3 text-slate-400">{tenants.find(x => x.id === t.org_id)?.name || `#${t.org_id}`}</td>}
+                <td className="px-4 py-3"><Badge className={prioColor[t.priority]}>{t.priority.toUpperCase()}</Badge></td>
+                <td className="px-4 py-3"><Badge className={statusColor[t.status]}>{t.status}</Badge></td>
+                <td className={`px-4 py-3 text-xs font-semibold uppercase ${slaColor[t.sla_state || ''] || 'text-slate-500'}`}>{t.sla_state || '—'}</td>
+                <td className="px-4 py-3 text-slate-400">{t.assignee || '—'}</td>
+                <td className="px-4 py-3 text-slate-500">{ago(t.created_at)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <p className="text-xs text-slate-600 flex items-center gap-1"><RefreshCw size={11} /> Escalation policies run automatically in the backend worker; “Run escalations now” triggers them on demand.</p>
+      <button onClick={() => ticketsApi.runEscalations().then(load).catch(e => setError(e.message))}
+        className="text-xs px-3 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700">Run escalation sweep now</button>
+
+      {showCreate && (
+        <CreateTicketModal tenants={tenants} isPlatform={isPlatform} onClose={() => setShowCreate(false)}
+          onCreate={async d => { await ticketsApi.create(d); await load(); }} />
+      )}
+      {selected && <DetailDrawer ticket={selected} onClose={() => setSelected(null)} onChanged={load} />}
+    </div>
+  );
+};
+
+const Kpi: React.FC<{ label: string; value: number; color: string; icon: React.ReactNode }> = ({ label, value, color, icon }) => (
+  <div className="bg-slate-800/50 rounded-xl p-4 flex items-center gap-3">
+    <div className={`${color}`}>{icon}</div>
+    <div><p className={`text-2xl font-bold ${color}`}>{value}</p><p className="text-xs text-slate-400">{label}</p></div>
+  </div>
+);
+
+export default AdvancedTicketingPage;

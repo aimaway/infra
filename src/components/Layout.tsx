@@ -46,6 +46,7 @@ export default function Layout() {
       { to: '/admin/services-ops', icon: BellRing, label: 'Ticketing & Alerts Ops' },
       { to: '/client-admin/advanced-tickets', icon: Ticket, label: 'Advanced Ticketing' },
       { to: '/client-admin/notifications', icon: Radio, label: 'Notification Engine' },
+      { to: '/client-admin/playbooks', icon: Zap, label: 'Custom Playbooks' },
     ];
     adminNav = [
       { to: '/settings', icon: Settings, label: 'Settings' },
@@ -59,12 +60,10 @@ export default function Layout() {
       { to: '/client-admin/security-history', icon: Shield, label: 'Security History' },
       { to: '/client-admin/alerts', icon: AlertTriangle, label: 'Alerts' },
       { to: '/client-admin/statistics', icon: BarChart3, label: 'Statistics' },
-      { to: '/client-admin/tickets', icon: Ticket, label: 'Tickets' },
-      { to: '/client-admin/advanced-tickets', icon: Inbox, label: 'Advanced Ticketing' },
+      { to: '/client-admin/advanced-tickets', icon: Inbox, label: 'Tickets' },
       { to: '/client-admin/notifications', icon: Radio, label: 'Notification Engine' },
       { to: '/client-admin/playbooks', icon: Zap, label: 'Custom Playbooks' },
       { to: '/client-admin/compliance-reports', icon: FileCheck, label: 'Compliance Reports' },
-      { to: '/client-admin/widgets', icon: Activity, label: 'Dashboard Builder' },
     ];
     adminNav = [
       { to: '/client-admin/plans', icon: ShieldCheck, label: 'Plans & Billing' },

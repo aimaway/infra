@@ -17,5 +17,5 @@
     "esModuleInterop": true,
     "allowJs": true
   },
-  "include": ["src", "components", "client-admin", "types", "LandingPage.tsx"]
+  "include": ["src"]
 }
